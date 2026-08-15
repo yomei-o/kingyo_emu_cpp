@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kingyo OS - 金魚 / 和金 (C++/WASM)</title>
+<style>
+  :root{ --fg:#7fd8d8; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:#050b0d; color:var(--fg); font-family:'Courier New',monospace;
+        min-height:100vh; display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
+  h1{ font-size:16px; margin:0; font-weight:700; }
+  .sub{ font-size:12px; color:#5f9c9c; max-width:960px; text-align:center; line-height:1.6; }
+  canvas{ width:min(96vw,960px); height:auto; background:#050b0d;
+          border:1px solid #244; border-radius:6px; box-shadow:0 6px 26px #000a; cursor:crosshair; }
+  #panel{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; justify-content:center; max-width:960px; }
+  .ctl{ display:flex; flex-direction:column; font-size:11px; color:#5f9c9c; min-width:150px; }
+  .ctl b{ color:var(--fg); }
+  input[type=range]{ accent-color:var(--fg); }
+  button{ font-family:inherit; font-size:13px; padding:7px 13px; border:1px solid #366; border-radius:6px;
+          background:#0b1a1c; color:var(--fg); cursor:pointer; min-width:150px; transition:background .12s; }
+  button:hover{ background:#12292c; }
+  button.hit{ background:#bff; color:#062; }
+  button.primary{ background:var(--fg); color:#062028; border:none; font-weight:700; }
+  #status{ font-size:12px; color:#5f9c9c; font-variant-numeric:tabular-nums; min-height:1.2em; }
+  a{ color:var(--fg); }
+  body.fs{ padding:0; background:#000; gap:0; }
+  body.fs h1, body.fs .sub, body.fs #panel, body.fs #status{ display:none; }
+  body.fs canvas{ position:fixed; inset:0; width:100vw; height:100vh; max-width:none;
+                  object-fit:contain; border:none; border-radius:0; box-shadow:none; cursor:none; }
+</style>
+</head>
+<body>
+  <h1>🐟 金魚シミュレータ — 和金 <span style="color:#5f9c9c;font-size:12px">(C++ / WASM)</span></h1>
+  <p class="sub">
+    泳ぎを「アニメーション」ではなく物理で出しています。魚は体を<b>進行波</b>で送って進み
+    （振幅は尾に向かって増大）、<b>尾の振り数は遊泳速度から決まります</b>
+    （ストローハル数 St = f·2A/U ≈ 0.3。速く泳げば勝手に速く振れる）。<br>
+    <b>金魚らしさは尾びれのなびきです。</b>尾は体に貼り付けた板ではなく、
+    <b>体を伝わる進行波の続き</b>として描いています。波は s（鼻先0〜尾柄1）が大きいほど
+    位相が遅れるので、尾は体が振り終わってから遅れて返ってきます。
+    体が大きいぶん旋回はゆっくりで、曲がるときは体を大きく弓なりにします。
+    群れは作りません（互いに避けるだけ）。胸びれは止まっているときほど忙しなく漕ぎます。<br>
+    <b>クリックしたところに餌が落ちます。</b>計算も描画もすべて C++ → WASM。F キーで全画面。<br>
+    <b>水槽の大きさは画角から作っています</b>（奥行きだけ 0.30m 固定）。床・水面・左右のガラスが
+    画面に入らない大きさに、魚が画面の外へ出入りできるぶんの水を足したもの。だから
+    画角を 1.5m まで広げても「水の中を覗いている」ままです。匹数ではなく<b>密度</b>で持つので、
+    寄っても引いても混み具合は同じに見えます（いまの容量と匹数は下に出ます）。
+  </p>
+  <canvas id="cv"></canvas>
+  <div id="panel"></div>
+  <div id="status">読み込み中…</div>
+  <p class="sub">ソース: <a href="https://github.com/yomei-o/kingyo_emu_cpp">github.com/yomei-o/kingyo_emu_cpp</a></p>
+
+<!-- sim.js / sim.wasm はファイル名が変わらないので、ブラウザが古いものを 10 分使い回す
+     (GitHub Pages の Cache-Control: max-age=600)。index.html だけ新しくなると、
+     新しいスライダが古い wasm を叩いて「動かしても何も起きない」になる。更新したら v を上げる。 -->
+<script src="sim.js?v=3"></script>
+<script>
+"use strict";
+const SLIDERS = [
+  { id:0, label:"密度 [匹/L]",     min:0.01, max:0.30, step:0.01, val:0.05, dec:2 },
+  { id:7, label:"画角 [m]",        min:0.18,max:1.50,step:0.02, val:0.38,dec:2 },
+  { id:8, label:"遠近感(カメラ距離 m)", min:0.4, max:5.0, step:0.1, val:3.0, dec:1 },
+  { id:1, label:"群れの強さ",      min:0,   max:2.5, step:0.05, val:1.0, dec:2 },
+  { id:2, label:"遊泳速度",        min:0.3, max:2.5, step:0.05, val:1.0, dec:2 },
+  { id:3, label:"水の濁り",        min:0,   max:1.6, step:0.05, val:1.0, dec:2 },
+  { id:4, label:"光の強さ",        min:0,   max:2.0, step:0.05, val:1.0, dec:2 },
+];
+const $=id=>document.getElementById(id);
+const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
+let M=null, api={}, W=0, H=0, img=null, playing=true, frames=0, lastT=0, fpsAvg=0, lag=0;
+
+createSim({locateFile:(p,dir)=>dir+p+"?v=3"}).then(mod=>{
+  M=mod;
+  api.init  =M.cwrap("sim_init","number",["number","number"]);
+  api.w     =M.cwrap("sim_w","number",[]);
+  api.h     =M.cwrap("sim_h","number",[]);
+  api.reset =M.cwrap("sim_reset",null,[]);
+  api.step  =M.cwrap("sim_step",null,["number"]);
+  api.render=M.cwrap("sim_render","number",[]);
+  api.click =M.cwrap("sim_click",null,["number","number"]);
+  api.set   =M.cwrap("sim_set",null,["number","number"]);
+  api.action=M.cwrap("sim_action",null,["number"]);
+  api.get   =M.cwrap("sim_get","number",["number"]);
+  api.init(0,0);
+  W=api.w(); H=api.h(); cv.width=W; cv.height=H; img=ctx.createImageData(W,H);
+  buildPanel();
+  SLIDERS.forEach(s=>api.set(s.id, s.val));
+  loop();
+});
+
+function setText(el,s){ if(el.textContent!==s) el.textContent=s; }
+
+function buildPanel(){
+  SLIDERS.forEach(s=>{
+    const wrap=document.createElement("label"); wrap.className="ctl";
+    const head=document.createElement("span");
+    head.innerHTML=`${s.label} <b id="v${s.id}">${(+s.val).toFixed(s.dec)}</b>`;
+    const inp=document.createElement("input"); inp.type="range";
+    inp.min=s.min; inp.max=s.max; inp.step=s.step; inp.value=s.val;
+    inp.addEventListener("input",()=>{ $("v"+s.id).textContent=(+inp.value).toFixed(s.dec);
+                                       if(M)api.set(s.id,+inp.value); });
+    wrap.appendChild(head); wrap.appendChild(inp); panel.appendChild(wrap);
+  });
+  const hit=b=>{ b.classList.add("hit"); setTimeout(()=>b.classList.remove("hit"),150); };
+  const mk=(t,c)=>{ const b=document.createElement("button"); b.textContent=t;
+                    if(c)b.className=c; panel.appendChild(b); return b; };
+  const press=(b,fn)=>{ let last=0;
+    const run=()=>{ const n=performance.now(); if(n-last<300)return; last=n; hit(b); if(M)fn(); };
+    b.addEventListener("pointerdown",run); b.addEventListener("click",run); };
+
+  press(mk("🍚 餌をやる"),()=>api.action(0));
+  press(mk("💥 驚かす"),()=>api.action(2));
+  // モデル確認 — 1匹だけ画面中央に固定して泳がせる(形やひれを見るため)
+  {
+    const b = mk("🔍 モデルを見る");
+    let on = false;
+    press(b, ()=>{ on = !on; api.set(20, on ? 1 : 0);
+                   setText(b, on ? "🐟 水槽に戻す" : "🔍 モデルを見る"); });
+  }
+  press(mk("⛶ 全画面"),()=>toggleFs());
+  const pp=mk("⏸ 一時停止","primary");
+  press(pp,()=>{ playing=!playing; setText(pp,playing?"⏸ 一時停止":"▶ 再生"); if(playing){lastT=0;loop();} });
+  press(mk("⟲ リセット"),()=>{ api.action(1); frames=0; });
+}
+
+function applyFs(on){ document.body.classList.toggle("fs",on); if(M)api.set(6,on?0:1); }
+function toggleFs(){
+  if(document.fullscreenElement) document.exitFullscreen();
+  else (document.documentElement.requestFullscreen?.()||Promise.reject())
+        .catch(()=>applyFs(!document.body.classList.contains("fs")));
+}
+document.addEventListener("fullscreenchange",()=>applyFs(!!document.fullscreenElement));
+window.addEventListener("keydown",e=>{
+  if(e.key==="f"||e.key==="F") toggleFs();
+  else if(e.key==="Escape"&&!document.fullscreenElement) applyFs(false);
+});
+
+function blit(){ const p=api.render(); img.data.set(M.HEAPU8.subarray(p,p+W*H*4)); ctx.putImageData(img,0,0); }
+function loop(ts){
+  if(!playing) return;
+  if(lastT){ lag += Math.min(120, ts-lastT); const f=1000/(ts-lastT); fpsAvg = fpsAvg? fpsAvg*0.9+f*0.1 : f; }
+  lastT=ts;
+  let n=Math.max(1,Math.min(3,Math.round(lag/16.667)));
+  lag=Math.max(0,lag-n*16.667);
+  api.step(n); blit(); frames+=n;
+  setText(statusEl,
+    `${fpsAvg.toFixed(0)} fps (x${n})   水槽 ${api.get(7)|0} L (${api.get(8).toFixed(2)}×${api.get(9).toFixed(2)}×0.30 m)   ` +
+    `和金 ${api.get(0)|0} 匹   ` +
+    `尾の振り ${api.get(4).toFixed(1)} Hz   遊泳 ${api.get(5).toFixed(1)} 体長/秒   ` +
+    `餌 ${api.get(2)|0}`);
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener("pointerdown",e=>{
+  if(!M)return;
+  const r=cv.getBoundingClientRect();
+  api.click((e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height);
+});
+</script>
+</body>
+</html>
