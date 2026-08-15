@@ -54,8 +54,8 @@ static const double TD = 0.30;
 // 画角。前面ガラスのところで横 VIEWW[m] が画面いっぱいに写る。
 // カメラを引いて焦点距離を伸ばすと、画角は同じまま遠近だけ弱まる(望遠の圧縮)。
 // 前後の大きさの比は (TD/n + CAMD) / CAMD なので、0.4m だと 1.56倍、3.0m だと 1.075倍。
-static double VIEWW = 0.38;
-static const double VIEWW_MAX = 1.50;            // 45インチのテレビで等身大に近い引きまで
+static double VIEWW = 1.36;                      // 既定。これくらいが水槽として自然に見える
+static const double VIEWW_MAX = 2.40;            // 既定(1.36)を中心に、寄りも引きも同じだけ振れる幅
 static double CAMD = 3.00;                       // 前面ガラスからカメラまで [m]
 static const double CAMD_MIN = 0.40;             // スライダの下限(近いほど遠近が強く出る)
 
@@ -156,7 +156,7 @@ static std::vector<float>    lightBuf;        // 低解像度の追加光 (RGB)
 static bool bgAllBack = false;                // 全セルが奥のガラス = 光を列と行に分けられる
 
 // ---------------------------------------------------------------- パラメータ
-static double p_dens   = 0.05;       // 匹/L (金魚は 1匹あたり 10〜20L。20Lに1匹で 0.05)
+static double p_dens   = 0.04;       // 匹/L (金魚は 1匹あたり 10〜20L。25Lに1匹で 0.04)
 static double p_school = 1.0;
 static double p_speed  = 1.0;
 static double p_murk   = 1.0;

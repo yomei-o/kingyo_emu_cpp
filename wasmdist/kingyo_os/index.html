@@ -44,7 +44,7 @@
     <b>クリックしたところに餌が落ちます。</b>計算も描画もすべて C++ → WASM。F キーで全画面。<br>
     <b>水槽の大きさは画角から作っています</b>（奥行きだけ 0.30m 固定）。床・水面・左右のガラスが
     画面に入らない大きさに、魚が画面の外へ出入りできるぶんの水を足したもの。だから
-    画角を 1.5m まで広げても「水の中を覗いている」ままです。匹数ではなく<b>密度</b>で持つので、
+    画角を 2.4m まで広げても「水の中を覗いている」ままです。匹数ではなく<b>密度</b>で持つので、
     寄っても引いても混み具合は同じに見えます（いまの容量と匹数は下に出ます）。
   </p>
   <canvas id="cv"></canvas>
@@ -55,12 +55,14 @@
 <!-- sim.js / sim.wasm はファイル名が変わらないので、ブラウザが古いものを 10 分使い回す
      (GitHub Pages の Cache-Control: max-age=600)。index.html だけ新しくなると、
      新しいスライダが古い wasm を叩いて「動かしても何も起きない」になる。更新したら v を上げる。 -->
-<script src="sim.js?v=5"></script>
+<script src="sim.js?v=8"></script>
 <script>
 "use strict";
 const SLIDERS = [
-  { id:0, label:"密度 [匹/L]",     min:0.01, max:0.30, step:0.01, val:0.05, dec:2 },
-  { id:7, label:"画角 [m]",        min:0.18,max:1.50,step:0.02, val:0.38,dec:2 },
+  // 密度は対数目盛り。0.01〜0.16 の真ん中がちょうど 0.04(既定)になる。
+  // 等間隔だと 0.04 が左端に寄って、薄い側の刻みが粗くなる
+  { id:0, label:"密度 [匹/L]",     min:0.01,max:0.16,val:0.04, dec:3, log:true },
+  { id:7, label:"画角 [m]",        min:0.30,max:2.40,step:0.02,val:1.36,dec:2 },
   { id:8, label:"遠近感(カメラ距離 m)", min:0.4, max:5.0, step:0.1, val:3.0, dec:1 },
   { id:1, label:"群れの強さ",      min:0,   max:2.5, step:0.05, val:1.0, dec:2 },
   { id:2, label:"遊泳速度",        min:0.3, max:2.5, step:0.05, val:1.0, dec:2 },
@@ -71,7 +73,7 @@ const $=id=>document.getElementById(id);
 const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
 let M=null, api={}, W=0, H=0, img=null, playing=true, frames=0, lastT=0, fpsAvg=0, lag=0;
 
-createSim({locateFile:(p,dir)=>dir+p+"?v=5"}).then(mod=>{
+createSim({locateFile:(p,dir)=>dir+p+"?v=8"}).then(mod=>{
   M=mod;
   api.init  =M.cwrap("sim_init","number",["number","number"]);
   api.w     =M.cwrap("sim_w","number",[]);
@@ -97,10 +99,14 @@ function buildPanel(){
     const wrap=document.createElement("label"); wrap.className="ctl";
     const head=document.createElement("span");
     head.innerHTML=`${s.label} <b id="v${s.id}">${(+s.val).toFixed(s.dec)}</b>`;
+    const toV = t => s.log ? s.min*Math.pow(s.max/s.min, t/1000) : +t;   // つまみ → 値
+    const toT = v => s.log ? 1000*Math.log(v/s.min)/Math.log(s.max/s.min) : v;
     const inp=document.createElement("input"); inp.type="range";
-    inp.min=s.min; inp.max=s.max; inp.step=s.step; inp.value=s.val;
-    inp.addEventListener("input",()=>{ $("v"+s.id).textContent=(+inp.value).toFixed(s.dec);
-                                       if(M)api.set(s.id,+inp.value); });
+    inp.min=s.log?0:s.min; inp.max=s.log?1000:s.max; inp.step=s.log?1:s.step;
+    inp.value=toT(s.val);
+    inp.addEventListener("input",()=>{ const v=toV(inp.value);
+                                       $("v"+s.id).textContent=v.toFixed(s.dec);
+                                       if(M)api.set(s.id,v); });
     wrap.appendChild(head); wrap.appendChild(inp); panel.appendChild(wrap);
   });
   const hit=b=>{ b.classList.add("hit"); setTimeout(()=>b.classList.remove("hit"),150); };
