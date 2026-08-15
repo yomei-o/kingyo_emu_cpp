@@ -25,14 +25,11 @@
 #include <vector>
 #include <algorithm>
 
-static const int TW = 256, TH = 80;    // 出力テクスチャ
-// 輪郭ぴったりだと背景やひれの根元を拾うので、少し内側に詰めてから展開する
-static const double INSET = 0.12;   // 背びれ・尻びれの付け根(明るい)を拾わない程度に内側へ
 
 int main(int argc, char** argv) {
     const char* in   = argc > 1 ? argv[1] : "kingyo.png";
     const char* out  = argc > 2 ? argv[2] : "src/kingyo_tex.h";
-    const char* dbg  = argc > 3 ? argv[3] : nullptr;   // 展開結果の確認用
+    const char* dbg  = argc > 3 ? argv[3] : nullptr;   // 作ったスプライトの確認用
     const char* dbg2 = argc > 4 ? argv[4] : nullptr;   // 元写真＋拾った輪郭
     const char* sym  = argc > 5 ? argv[5] : "KINGYO";
 
@@ -148,29 +145,6 @@ int main(int argc, char** argv) {
     fprintf(stderr, "体高: 左から2割 %.0f / 右から2割 %.0f\n", hL, hR);
     fprintf(stderr, "頭は %s向き\n", headRight ? "右" : "左");
 
-    // --- 展開
-    std::vector<unsigned char> tex((size_t)TW * TH * 4, 0);
-    for (int i = 0; i < TW; ++i) {
-        double u = (double)i / (TW - 1);                  // 0=鼻先 1=尾柄
-        // 尾柄の端は**尾びれの根元(明るい黄色)**が混ざる。そのまま貼ると、体と尾の
-        // 継ぎ目に白っぽい塊が出る。最後の1割は 90% の位置の色をそのまま伸ばす
-        double uu = std::min(u, 0.90);
-        double xf = headRight ? (bestB - 1 - uu * (bestB - 1 - bestA))
-                              : (bestA + uu * (bestB - 1 - bestA));
-        int x = std::min(bestB - 1, std::max(bestA, (int)(xf + 0.5)));
-        double t = tS[x], b = bS[x], mid = (t + b) * 0.5, hh = (b - t) * 0.5 * (1.0 - INSET);
-        for (int j = 0; j < TH; ++j) {
-            double v = (double)j / (TH - 1) * 2.0 - 1.0;   // -1=背 +1=腹
-            double yf = mid + v * hh;
-            int y = std::min(h - 1, std::max(0, (int)(yf + 0.5)));
-            size_t o = (size_t)(j * TW + i) * 4;
-            tex[o+0] = (unsigned char)A(x, y, 0);
-            tex[o+1] = (unsigned char)A(x, y, 1);
-            tex[o+2] = (unsigned char)A(x, y, 2);
-            tex[o+3] = 255;
-        }
-    }
-    if (dbg) stbi_write_png(dbg, TW, TH, 4, tex.data(), TW * 4);
     if (dbg2) {   // 元写真に拾った輪郭を重ねる
         std::vector<unsigned char> ov((size_t)w * h * 3, 0);
         for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
@@ -189,18 +163,6 @@ int main(int argc, char** argv) {
     }
 
     const double bodyLenGlobal = (double)(bestB - bestA);
-    // 胴体の平均色。ひれの色みをここに寄せる(ひれと体は同じ色素なので、
-    // 白背景ぶんを引いただけの色は黄色に振り切れてしまう)
-    double bodyR = 0, bodyG = 0, bodyB = 0;
-    {
-        long c3 = 0;
-        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
-            if (bodym[(size_t)y * w + x]) { bodyR += A(x,y,0); bodyG += A(x,y,1); bodyB += A(x,y,2); c3++; }
-        if (c3 < 1) c3 = 1;
-        bodyR /= c3; bodyG /= c3; bodyB /= c3;
-        fprintf(stderr, "胴体の平均色 (%.0f,%.0f,%.0f)\n", bodyR, bodyG, bodyB);
-    }
-
     // ---- 体の輪郭も書き出す。**手で決めた体型に写真のひれを付けても、付け根が合わない。**
     // 中心線は「鼻先の中点〜尾柄の中点」を結んだ直線。そこからの上下の張り出しを体長で割る。
     // 魚は背と腹で膨らみ方が違うので、上下は別々に持つ(左右対称の体型にすると別の魚になる)
@@ -223,212 +185,6 @@ int main(int argc, char** argv) {
         double mt = 0, mb = 0;
         for (int i2 = 0; i2 <= NSEG; ++i2) { mt = std::max(mt, profT[i2]); mb = std::max(mb, profB[i2]); }
         fprintf(stderr, "体の輪郭: 張り出しの最大 背 %.3f / 腹 %.3f (体長比)\n", mt, mb);
-    }
-
-    // ---- ひれも写真から切り出す。**手続きで描いた板では本物に見えない。**
-    // 連結成分では分けられない(体の明るいところでひれ同士が繋がる)ので、
-    // 胴体の輪郭を基準に「どこにあるか」で分ける:
-    //   尾   … 胴体の x 範囲より尾側
-    //   背   … 胴体の範囲内で上の縁より外
-    //   腹側 … 下の縁より外を、前から 胸/腹/尻 に切る
-    // 切り出したら**根元が左、先が右**に揃えて長方形へ詰める(貼る側の向きを1つにするため)。
-    // 形は α が持つので、まっすぐな縁の板にはならない。
-    struct Fin { const char* name; std::vector<unsigned char> img; int w, h;
-                 double lenBL, spanBL, atS; };
-    std::vector<Fin> fins;
-    const int FW2 = 128, FH2 = 96;
-    double bodyLen = bodyLenGlobal;
-    auto cut = [&](const char* name, int x0, int x1, bool aboveTop, bool belowBot, int rot) {
-        // rot: 0=そのまま(尾) 1=下が根元(背びれ) 2=上が根元(腹側のひれ)
-        int ax = w, bx = -1, ay = h, by = -1; long cnt = 0;
-        auto isFinRaw = [&](int x, int y) {
-            if (x < 0 || y < 0 || x >= w || y >= h) return false;
-            if (!fishm[(size_t)y * w + x] || bodym[(size_t)y * w + x]) return false;
-            bool inBody = (x >= bestA && x < bestB);
-            if (aboveTop && !(inBody && y < tS[x] - 1)) return false;
-            if (belowBot && !(inBody && y > bS[x] + 1)) return false;
-            return true;
-        };
-        // **いちばん大きい塊だけ残す。** 写真には髭のような細い線や写り込みが入っていて、
-        // そのまま貼ると魚から黒い筋が生えたように見える。
-        // ただし細い線はひれと**繋がっている**ことがあるので、塊を数える前に
-        // 2画素ぶん痩せさせる(収縮)。細い線はここで消え、ひれは残る
-        std::vector<unsigned char> thin((size_t)w * h, 0);
-        for (int y = 0; y < h; ++y) for (int x = std::max(0,x0); x <= std::min(w-1,x1); ++x)
-            thin[(size_t)y * w + x] = isFinRaw(x, y) ? 1 : 0;
-        for (int it2 = 0; it2 < 2; ++it2) {
-            std::vector<unsigned char> t2 = thin;
-            for (int y = 1; y < h - 1; ++y) for (int x = std::max(1,x0); x <= std::min(w-2,x1); ++x) {
-                if (!t2[(size_t)y * w + x]) continue;
-                if (!t2[(size_t)(y-1) * w + x] || !t2[(size_t)(y+1) * w + x] ||
-                    !t2[(size_t)y * w + x - 1] || !t2[(size_t)y * w + x + 1])
-                    thin[(size_t)y * w + x] = 0;
-            }
-        }
-        std::vector<int> lab((size_t)w * h, 0);
-        int nlab = 0, bestLab = 0; long bestCnt = 0;
-        std::vector<int> st;
-        for (int y = 0; y < h; ++y) for (int x = std::max(0,x0); x <= std::min(w-1,x1); ++x) {
-            if (!thin[(size_t)y * w + x] || lab[(size_t)y * w + x]) continue;
-            ++nlab; long c2 = 0; st.clear(); st.push_back(y * w + x);
-            lab[(size_t)y * w + x] = nlab;
-            while (!st.empty()) {
-                int q2 = st.back(); st.pop_back(); c2++;
-                int qx = q2 % w, qy = q2 / w;
-                const int dx4[4] = {1,-1,0,0}, dy4[4] = {0,0,1,-1};
-                for (int d2 = 0; d2 < 4; ++d2) {
-                    int nx2 = qx + dx4[d2], ny2 = qy + dy4[d2];
-                    if (nx2 < std::max(0,x0) || nx2 > std::min(w-1,x1) || ny2 < 0 || ny2 >= h) continue;
-                    if (lab[(size_t)ny2 * w + nx2] || !thin[(size_t)ny2 * w + nx2]) continue;
-                    lab[(size_t)ny2 * w + nx2] = nlab; st.push_back(ny2 * w + nx2);
-                }
-            }
-            // 面積だけで選ぶと、写真に写り込んだ**細い線**が勝ってしまう(長いので画素数が多い)。
-            // ひれは面で埋まっているので、外接矩形の詰まり具合を掛けて選ぶ
-            long bx0 = w, bx1 = -1, by0 = h, by1 = -1;
-            for (int yy = 0; yy < h; ++yy) for (int xx = std::max(0,x0); xx <= std::min(w-1,x1); ++xx)
-                if (lab[(size_t)yy * w + xx] == nlab) {
-                    bx0 = std::min(bx0, (long)xx); bx1 = std::max(bx1, (long)xx);
-                    by0 = std::min(by0, (long)yy); by1 = std::max(by1, (long)yy);
-                }
-            double fill = (bx1 >= bx0) ? (double)c2 / ((bx1-bx0+1.0) * (by1-by0+1.0)) : 0.0;
-            double score = c2 * fill;
-            if (score > bestCnt) { bestCnt = (long)score; bestLab = nlab; }
-        }
-        // 選んだ塊の外接矩形を少し広げ、その中では元のマスクを使う(痩せた分を戻す)
-        int kx0 = w, kx1 = -1, ky0 = h, ky1 = -1;
-        for (int y = 0; y < h; ++y) for (int x = std::max(0,x0); x <= std::min(w-1,x1); ++x)
-            if (lab[(size_t)y * w + x] == bestLab) {
-                kx0 = std::min(kx0,x); kx1 = std::max(kx1,x);
-                ky0 = std::min(ky0,y); ky1 = std::max(ky1,y);
-            }
-        const int PAD = 3;
-        kx0 -= PAD; kx1 += PAD; ky0 -= PAD; ky1 += PAD;
-        auto isFin = [&](int x, int y) {
-            if (x < kx0 || x > kx1 || y < ky0 || y > ky1) return false;
-            return isFinRaw(x, y);
-        };
-        for (int y = 0; y < h; ++y) for (int x = std::max(0,x0); x <= std::min(w-1,x1); ++x)
-            if (isFin(x, y)) { ax = std::min(ax,x); bx = std::max(bx,x);
-                               ay = std::min(ay,y); by = std::max(by,y); cnt++; }
-        if (cnt < 60) { fprintf(stderr, "  %-8s 見つからない(%ld画素)\n", name, cnt); return; }
-        int cw = bx - ax + 1, ch = by - ay + 1;
-        Fin fn; fn.name = name; fn.w = FW2; fn.h = FH2;
-        fn.img.assign((size_t)FW2 * FH2 * 4, 0);
-        // **根元を揃えて詰める。** 外接矩形をそのまま貼ると、根元の行がほとんど透明な
-        // ひれ(基底が斜めのもの)は体から浮いて見える。列ごとに「体に一番近い画素」を探し、
-        // そこを u=0 に揃える。長さは列ごとに違ってよい(先の形は α が持つ)
-        int maxLen = 1;
-        std::vector<int> rootAt(FW2, -1), lenAt(FW2, 0);
-        for (int j = 0; j < FH2; ++j) {
-            double v = (double)j / (FH2 - 1);
-            int x, first = -1, last = -1;
-            if (rot == 0) {                       // 尾: 体側は headRight なら大きい x
-                int y = (int)(ay + v * (ch - 1) + 0.5);
-                y = std::min(h-1, std::max(0, y));
-                for (int k = 0; k < cw; ++k) {
-                    x = headRight ? (bx - k) : (ax + k);
-                    if (isFin(x, y)) { if (first < 0) first = k; last = k; }
-                }
-            } else {                              // 背/腹: 体側は rot==1 なら大きい y
-                x = (int)((headRight ? (bx - v * (cw - 1)) : (ax + v * (cw - 1))) + 0.5);
-                x = std::min(w-1, std::max(0, x));
-                for (int k = 0; k < ch; ++k) {
-                    int y = (rot == 1) ? (by - k) : (ay + k);
-                    if (isFin(x, y)) { if (first < 0) first = k; last = k; }
-                }
-            }
-            rootAt[j] = first; lenAt[j] = (first < 0) ? 0 : (last - first + 1);
-        }
-        if (rot == 0) {
-            // **尾は根元が縦一直線**。行ごとに揃えると二叉の切れ込みが潰れてしまう。
-            // いちばん体に近い位置を全行の共通の根元にする
-            int mn = 1 << 30;
-            for (int j = 0; j < FH2; ++j) if (rootAt[j] >= 0) mn = std::min(mn, rootAt[j]);
-            if (mn == (1 << 30)) mn = 0;
-            for (int j = 0; j < FH2; ++j) {
-                if (rootAt[j] < 0) continue;
-                lenAt[j] += rootAt[j] - mn;
-                rootAt[j] = mn;
-            }
-        }
-        for (int j = 0; j < FH2; ++j) maxLen = std::max(maxLen, lenAt[j]);
-        for (int j = 0; j < FH2; ++j) for (int i = 0; i < FW2; ++i) {
-            double u = (double)i / (FW2 - 1), v = (double)j / (FH2 - 1);
-            size_t o = (size_t)(j * FW2 + i) * 4;
-            if (rootAt[j] < 0) { fn.img[o+3] = 0; continue; }
-            int step = rootAt[j] + (int)(u * (maxLen - 1) + 0.5);
-            int x, y;
-            if (rot == 0) {
-                x = headRight ? (bx - step) : (ax + step);
-                y = (int)(ay + v * (ch - 1) + 0.5);
-            } else {
-                x = (int)((headRight ? (bx - v * (cw - 1)) : (ax + v * (cw - 1))) + 0.5);
-                y = (rot == 1) ? (by - step) : (ay + step);
-            }
-            x = std::min(w-1, std::max(0, x)); y = std::min(h-1, std::max(0, y));
-            if (!isFin(x, y)) { fn.img[o+3] = 0; continue; }
-            // **ひれは透ける。** 白背景で撮った写真では、透けたぶんだけ背景の白が
-            // 混ざって「白っぽい」色になっている。そのまま貼ると、透けない板になる。
-            // 白がどれだけ混ざったかから透過率を出して、ひれ本来の色に戻す:
-            //   観測 = a*色 + (1-a)*白   →   a = 1 - min(観測)/255,  色 = (観測 - (1-a)*白)/a
-            double r0 = A(x,y,0), g0 = A(x,y,1), b0 = A(x,y,2);
-            double mn = std::min(r0, std::min(g0, b0));
-            double al = 1.0 - mn / 255.0;
-            if (al < 0.06) { fn.img[o+3] = 0; continue; }      // ほぼ透明なところ
-            double inv = 1.0 / al, wht = (1.0 - al) * 255.0;
-            double cr = (r0 - wht) * inv, cg = (g0 - wht) * inv, cb = (b0 - wht) * inv;
-            // **暗い画素は「透けたひれ」ではない。** 体の影が落ちているところや写真の
-            // 写り込みで、白背景の前提が崩れている。戻した色が黒くなるので落とす
-            // (残すと、ひれの付け根にゴミのような黒い点として出る)
-            if (cr + cg + cb < 250.0) { fn.img[o+3] = 0; continue; }
-            // **色みは体に合わせる。** 引き算だけだと青が 0 に張り付いて真っ黄色になる。
-            // 明暗のむら(鰭条)はひれ自身のものを残し、色みだけ胴体の平均色へ寄せる
-            {
-                double lum = 0.30 * cr + 0.59 * cg + 0.11 * cb;
-                double bl2 = 0.30 * bodyR + 0.59 * bodyG + 0.11 * bodyB;
-                double k2 = (bl2 > 1.0) ? lum / bl2 : 1.0;
-                const double MIX = 0.62;                  // 体の色みへ寄せる割合
-                cr = cr * (1 - MIX) + bodyR * k2 * MIX;
-                cg = cg * (1 - MIX) + bodyG * k2 * MIX;
-                cb = cb * (1 - MIX) + bodyB * k2 * MIX;
-            }
-            fn.img[o+0] = (unsigned char)std::min(255.0, std::max(0.0, cr));
-            fn.img[o+1] = (unsigned char)std::min(255.0, std::max(0.0, cg));
-            fn.img[o+2] = (unsigned char)std::min(255.0, std::max(0.0, cb));
-            // 実際のひれはここまで薄くない(白背景ぶんを引きすぎる)ので、少し持ち上げる。
-            // 根元は体の下に隠れているので、そこだけ消していく
-            double rootFade = std::min(1.0, u / 0.06);
-            fn.img[o+3] = (unsigned char)std::min(255.0, (60.0 + al * 210.0) * rootFade);
-        }
-        // 縁を1画素ならす(切り口のギザギザを消す)
-        std::vector<unsigned char> al((size_t)FW2 * FH2);
-        for (int k = 0; k < FW2 * FH2; ++k) al[k] = fn.img[(size_t)k * 4 + 3];
-        for (int j = 1; j < FH2 - 1; ++j) for (int i = 1; i < FW2 - 1; ++i) {
-            int sum = 0;
-            for (int b2 = -1; b2 <= 1; ++b2) for (int a2 = -1; a2 <= 1; ++a2)
-                sum += al[(size_t)(j + b2) * FW2 + (i + a2)];
-            fn.img[((size_t)j * FW2 + i) * 4 + 3] = (unsigned char)(sum / 9);
-        }
-        fn.lenBL  = maxLen / bodyLen;
-        fn.spanBL = (rot == 0 ? ch : cw) / bodyLen;
-        double cx2 = (ax + bx) * 0.5;
-        fn.atS = headRight ? (bestB - 1 - cx2) / bodyLen : (cx2 - bestA) / bodyLen;
-        if (fn.atS < 0) fn.atS = 0; if (fn.atS > 1) fn.atS = 1;
-        fins.push_back(fn);
-        fprintf(stderr, "  %-8s %3dx%-3d 画素  長さ %.2f体長 幅 %.2f  s=%.2f\n",
-                name, cw, ch, fn.lenBL, fn.spanBL, fn.atS);
-    };
-    fprintf(stderr, "ひれを切り出す:\n");
-    cut("CAUDAL",   headRight ? 0 : bestB, headRight ? bestA : w - 1, false, false, 0);
-    cut("DORSAL",   bestA, bestB - 1, true, false, 1);
-    {
-        int L = bestB - bestA;
-        int f0 = headRight ? bestB - 1 - (int)(0.42 * L) : bestA + (int)(0.42 * L);
-        int f1 = headRight ? bestB - 1 - (int)(0.62 * L) : bestA + (int)(0.62 * L);
-        cut("PECTORAL", headRight ? f0 : bestA, headRight ? bestB - 1 : f0, false, true, 2);
-        cut("PELVIC",   headRight ? f1 : f0,    headRight ? f0 : f1,        false, true, 2);
-        cut("ANAL",     headRight ? bestA : f1, headRight ? f1 : bestB - 1, false, true, 2);
     }
 
     // ---- 魚まるごと1枚のスプライト。
@@ -512,41 +268,11 @@ int main(int argc, char** argv) {
                 sprNose, sprPed, sprAxis, sprScale, sprAspect);
     }
 
+    if (dbg) stbi_write_png(dbg, SW, SH, 4, full.data(), SW * 4);
+
     FILE* f = fopen(out, "w");
     if (f) {
-        fprintf(f, "// 自動生成 (tools/mktex.cpp)。写真から展開した胴体テクスチャ。\n");
-        fprintf(f, "static const int %s_TW = %d;\n", sym, TW);
-        fprintf(f, "static const int %s_TH = %d;\n", sym, TH);
-        // ひれの色も写真から取る(胴体と分けた「明るいほう」の平均)。
-        // シミュレータ側はこれを薄めてひれを塗る。手で決めた色だと魚を変えるたびに合わなくなる
-        {
-            long fr2 = 0, fg2 = 0, fb2 = 0, fc = 0;
-            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
-                if (fishm[(size_t)y * w + x] && !bodym[(size_t)y * w + x]) {
-                    fr2 += A(x,y,0); fg2 += A(x,y,1); fb2 += A(x,y,2); fc++;
-                }
-            if (fc < 1) fc = 1;
-            fprintf(f, "static const unsigned char %s_FIN[3] = {%d,%d,%d};\n",
-                    sym, (int)(fr2/fc), (int)(fg2/fc), (int)(fb2/fc));
-            fprintf(stderr, "ひれの平均色 (%d,%d,%d)\n", (int)(fr2/fc), (int)(fg2/fc), (int)(fb2/fc));
-        }
-        fprintf(f, "static const unsigned char %s_TEX[] = {\n", sym);
-        for (size_t i = 0; i < tex.size(); ++i)
-            fprintf(f, "%d,%s", tex[i], (i % 32 == 31) ? "\n" : "");
-        fprintf(f, "};\n");
-        // ひれも写真から。形は α が持つので、まっすぐな縁の板にならない
-        for (size_t k = 0; k < fins.size(); ++k) {
-            const Fin& fn = fins[k];
-            fprintf(f, "static const int %s_%s_W = %d, %s_%s_H = %d;\n",
-                    sym, fn.name, fn.w, sym, fn.name, fn.h);
-            fprintf(f, "// 長さ/体長, 幅/体長, 付く位置 s(0=鼻先 1=尾柄)\n");
-            fprintf(f, "static const float %s_%s_MET[3] = {%.4ff,%.4ff,%.4ff};\n",
-                    sym, fn.name, fn.lenBL, fn.spanBL, fn.atS);
-            fprintf(f, "static const unsigned char %s_%s[] = {\n", sym, fn.name);
-            for (size_t i = 0; i < fn.img.size(); ++i)
-                fprintf(f, "%d,%s", fn.img[i], (i % 32 == 31) ? "\n" : "");
-            fprintf(f, "};\n");
-        }
+        fprintf(f, "// 自動生成 (tools/mktex.cpp)。写真から作った金魚のスプライト。\n");
         fprintf(f, "// 体の輪郭。中心線からの張り出し(体長比)。0=鼻先 1=尾柄\n");
         fprintf(f, "#define %s_HAS_FULL 1\n", sym);
         fprintf(f, "static const int %s_FULL_W = %d, %s_FULL_H = %d;\n", sym, SW, sym, SH);
@@ -563,9 +289,8 @@ int main(int argc, char** argv) {
         fprintf(f, "};\nstatic const float %s_BOT[] = {", sym);
         for (int i2 = 0; i2 <= NSEG; ++i2) fprintf(f, "%.4ff,", profB[i2]);
         fprintf(f, "};\n");
-        fprintf(f, "#define %s_NFIN %d\n", sym, (int)fins.size());
         fclose(f);
-        fprintf(stderr, "wrote %s (%dx%d, ひれ %d枚)\n", out, TW, TH, (int)fins.size());
+        fprintf(stderr, "wrote %s (%dx%d)\n", out, SW, SH);
     }
     stbi_image_free(img);
     return 0;

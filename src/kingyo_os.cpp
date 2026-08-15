@@ -462,7 +462,7 @@ static void tex_quad(double ax,double ay,double bx,double by,double cx,double cy
 // 体は「縦スパン + 被覆率」で自前に塗る。上下の輪郭がアンチエイリアスされ、
 // 体色も v(背=-1 〜 腹=+1) の連続関数として出せるので、帯のベタ塗りにならない。
 
-#if HAVE_PHOTO && defined(KINGYO_HAS_FULL)
+#if HAVE_PHOTO
 // ---------------------------------------------------------------- 写真1枚を曲げて描く
 // 体を短冊に展開し、ひれを別々に貼る作りは、写真の「魚らしさ」を分解してしまう。
 // 頭の丸み・ひれの付き方・目の位置がそれぞれ別に近似され、どこかが必ず嘘になる。
@@ -474,8 +474,6 @@ static void tex_quad(double ax,double ay,double bx,double by,double cx,double cy
 //   v → 体の中心線からの上下のずれ
 // さらに**写真から測った輪郭より外にある点はひれ**とみなし、余分に揺らす。
 // こうすると胸びれも腹びれも尻びれも、切り出さずに動く。
-static bool p_warp = true;
-
 // 格子の三角形を1枚塗る。**明るさと透け具合も頂点で持って補間する。**
 // 面ごとに1つの値にすると、格子の目がそのまま縞になって出る
 // (胴の丸みも、ひれの透け方も、格子より細かく変わるので面単位では足りない)
@@ -663,10 +661,11 @@ static void draw_fish_full(const Fish& f) {
 }
 #endif
 
+#if HAVE_PHOTO
+static void draw_fish(const Fish& f) { draw_fish_full(f); }
+#else
+// 写真が無いときの手続き描画。形は出るが、板を並べた見え方になる
 static void draw_fish(const Fish& f) {
-#if HAVE_PHOTO && defined(KINGYO_HAS_FULL)
-    if (p_warp) { draw_fish_full(f); return; }
-#endif
     const int NS = 26;
     double cy = cos(f.yaw), sy = sin(f.yaw);
     double fx = cy * cos(f.pitch), fy = sin(f.pitch), fz = sy * cos(f.pitch);
@@ -681,21 +680,7 @@ static void draw_fish(const Fish& f) {
         double sc;
         project(f.x + fx * along + ax * lat, f.y + fy * along, f.z + fz * along + az * lat,
                 SX[i], SY[i], sc);
-#if HAVE_PHOTO && defined(KINGYO_HAS_PROFILE)
-        // 体の輪郭は**写真から測ったもの**を使う。手で決めた体型に写真のひれを付けると、
-        // 付け根が体から浮いたり食い込んだりする(写真とプロポーションが違うため)
-        {
-            double u2 = s * KINGYO_NSEG;
-            int i2 = clampi((int)u2, 0, KINGYO_NSEG - 1);
-            double fr3 = u2 - i2;
-            double mid = KINGYO_MID[i2] + (KINGYO_MID[i2+1] - KINGYO_MID[i2]) * fr3;
-            double hlf = KINGYO_BOT[i2] + (KINGYO_BOT[i2+1] - KINGYO_BOT[i2]) * fr3;
-            SY[i] += mid * f.L * f.girth * sc;          // 上下の中点へずらす
-            HH[i]  = hlf * f.L * f.girth * sc;
-        }
-#else
         HH[i] = 0.5 * body_height(s) * BODY_H * f.girth * f.L * sc;
-#endif
     }
 
     // 正面を向いた魚が線に潰れないようにする。魚はリボン(板)ではなく厚みのある体なので、
@@ -735,21 +720,6 @@ static void draw_fish(const Fish& f) {
     double shade = (0.78 + 0.30 * side) * f.tint;
     auto tex_color = [&](double v, double s, int& R, int& G, int& B) {
         double r, g, bl;
-#if HAVE_PHOTO
-        // 写真から展開したテクスチャ。鱗も色の抜けもそのまま出る
-        double tu = s * (KINGYO_TW - 1);
-        double tv = (v * 0.5 + 0.5) * (KINGYO_TH - 1);
-        int i0 = clampi((int)tu, 0, KINGYO_TW - 2), j0 = clampi((int)tv, 0, KINGYO_TH - 2);
-        double ft = tu - i0, gt = tv - j0;
-        const unsigned char* a = &KINGYO_TEX[((size_t)j0 * KINGYO_TW + i0) * 4];
-        const unsigned char* b = a + 4;
-        const unsigned char* c = &KINGYO_TEX[((size_t)(j0 + 1) * KINGYO_TW + i0) * 4];
-        const unsigned char* d = c + 4;
-        double w00 = (1 - ft) * (1 - gt), w10 = ft * (1 - gt), w01 = (1 - ft) * gt, w11 = ft * gt;
-        r  = a[0] * w00 + b[0] * w10 + c[0] * w01 + d[0] * w11;
-        g  = a[1] * w00 + b[1] * w10 + c[1] * w01 + d[1] * w11;
-        bl = a[2] * w00 + b[2] * w10 + c[2] * w01 + d[2] * w11;
-#else
         // 写真が無いときの体色。金魚の朱は「背が濃く、腹に向かって薄くなって白に抜ける」。
         // v: -1=背 +1=腹
         double belly = smoothstep(0.05, 1.10, v);             // 腹側の白へなだらかに抜ける
@@ -775,7 +745,6 @@ static void draw_fish(const Fish& f) {
         double gs = 0.205 + 0.030 * (1.0 - v * v);      // 中ほどが後ろへ張り出す弧
         double gill = smoothstep(gs - 0.022, gs, s) * (1.0 - smoothstep(gs, gs + 0.022, s));
         r *= 1.0 - 0.10 * gill; g *= 1.0 - 0.10 * gill; bl *= 1.0 - 0.10 * gill;
-#endif
         // ---- 丸み。写真をそのまま貼ると板に見えるので、断面の丸さぶんの陰影を足す。
         // 体は横から見ると楕円なので、v(背-1〜腹+1) の位置で「こちらを向いている度合い」が
         // 決まる: nz = sqrt(1-v^2)。縁ほど光が回り込まず暗くなり、中ほどは明るい。
@@ -836,17 +805,9 @@ static void draw_fish(const Fish& f) {
     // 朱の個体は朱いひれ、白勝ちの個体は白いひれになる(テトラのような青白ではない)
     int br_, bg_, bb_;
     tex_color(0.10, 0.86, br_, bg_, bb_);
-#if HAVE_PHOTO
-    // 写真から取ったひれの平均色。手で決めた色だと、魚を差し替えたときに合わなくなる
-    double fq = (0.62 + 0.38 * side) * (1 - fog);
-    int fr  = (int)(KINGYO_FIN[0] * fq + 14 * fog);
-    int fg2 = (int)(KINGYO_FIN[1] * fq + 44 * fog);
-    int fb  = (int)(KINGYO_FIN[2] * fq + 48 * fog);
-#else
     int fr  = (int)(br_ * 0.78 + 255 * 0.22);
     int fg2 = (int)(bg_ * 0.78 + 205 * 0.22);
     int fb  = (int)(bb_ * 0.78 + 165 * 0.22);
-#endif
     // 根元(rx,ry)から out 方向へ len だけ伸び、spr 方向へ ±half に開く扇。
     // notch>0 で後縁の中央がえぐれる(尾びれの二叉)。鰭条を細い三角形で重ねる。
     auto fan = [&](double rx, double ry, double ox, double oy, double px2, double py2,
@@ -894,11 +855,7 @@ static void draw_fish(const Fish& f) {
     // 体が振り終わった後から尾が遅れて返ってくる。この遅れは進行波の位相差で自然に出る。
     {
         const int NF = 7;                        // 尾びれの中心線の分割
-#if HAVE_PHOTO && defined(KINGYO_NFIN)
-        const double SEND = 1.0 + KINGYO_CAUDAL_MET[0] / 0.9;    // 写真での長さに合わせる
-#else
         const double SEND = 1.30;
-#endif
         double FX[NF + 1], FY[NF + 1], NX[NF + 1], NY[NF + 1];
         for (int k = 0; k <= NF; ++k) {
             double sq = 0.930 + (SEND - 0.930) * (double)k / NF;   // 少し重ねて隙間を消す
@@ -924,21 +881,6 @@ static void draw_fish(const Fish& f) {
             double q = (double)k / NF;
             twist[k] = 0.085 * f.L * sc0 * q * q * sin(f.phase * 0.85 - q * 2.2);
         }
-#if HAVE_PHOTO && defined(KINGYO_NFIN)
-        // 写真の尾。幅は写真の比率そのまま。形も透け方も α が持っている
-        double hw = KINGYO_CAUDAL_MET[1] * f.L * sc0 * 0.5;
-        for (int k = 0; k < NF; ++k) {
-            double u0 = (double)k / NF, u1 = (double)(k + 1) / NF;
-            // 上の葉は +twist、下の葉は -twist だけ前後にずれる = 面がねじれる
-            tex_quad(FX[k]   + NX[k]   * hw + uxs * twist[k],   FY[k]   + NY[k]   * hw + uys * twist[k],
-                     FX[k+1] + NX[k+1] * hw + uxs * twist[k+1], FY[k+1] + NY[k+1] * hw + uys * twist[k+1],
-                     FX[k+1] - NX[k+1] * hw - uxs * twist[k+1], FY[k+1] - NY[k+1] * hw - uys * twist[k+1],
-                     FX[k]   - NX[k]   * hw - uxs * twist[k],   FY[k]   - NY[k]   * hw - uys * twist[k],
-                     u0, u1, 0.0, 1.0,
-                     KINGYO_CAUDAL, KINGYO_CAUDAL_W, KINGYO_CAUDAL_H,
-                     1.00 * memF, shade, fog);
-        }
-#else
         double UX[NF + 1], UY[NF + 1], LX[NF + 1], LY[NF + 1];
         for (int k = 0; k <= NF; ++k) {
             double q = (double)k / NF;
@@ -954,96 +896,8 @@ static void draw_fish(const Fish& f) {
             tri(FX[k], FY[k], LX[k], LY[k], LX[k+1], LY[k+1], c);
             tri(FX[k], FY[k], LX[k+1], LY[k+1], FX[k+1], FY[k+1], c);
         }
-#endif
     }
 
-#if HAVE_PHOTO && defined(KINGYO_NFIN)
-    // ---- ひれは写真から。切り出した α 付きのひれを、体に合わせた四角形へ貼る。
-    // 手続きで描く板だと、まっすぐな縁とベタの膜になって本物に見えない。
-    // 写真のひれは鰭条も透け方も縁のほつれもそのまま入っている。
-    //
-    // MET = { 長さ/体長, 幅(基底方向)/体長, 付く位置 s }。写真での比率をそのまま使うので、
-    // どこに付くか・どれだけ張り出すかを手で決めなくてよい。
-    // sgn: -1=背側 +1=腹側 / lean: 後ろへの寝かせ具合 / aK: 透け具合
-    // dirx,diry: 根元から先へ向かう画面上の向き(単位ベクトル)。
-    // 胸びれのように「根元を軸に大きく漕ぐ」ひれは、これを回して動かす
-    auto photo_fin_dir = [&](const unsigned char* T, int tw, int th, const float* MET,
-                             double sgn, double dirx, double diry,
-                             double aK, double extra, double ripple) {
-        const int NQ = 8;
-        double s0 = MET[2] - MET[1] * 0.5, s1 = MET[2] + MET[1] * 0.5;
-        double len = MET[0] * f.L * sc0 * extra;
-        double RX[NQ + 1], RY[NQ + 1], TX2[NQ + 1], TY2[NQ + 1];
-        for (int k = 0; k <= NQ; ++k) {
-            double t = (double)k / NQ;
-            double sq = std::max(0.0, std::min(1.0, s0 + (s1 - s0) * t));
-            double fi = sq * NS; int i = clampi((int)fi, 0, NS - 1);
-            double fr2 = fi - i;
-            double rx = SX[i] + (SX[i+1] - SX[i]) * fr2;
-            double ry = SY[i] + (SY[i+1] - SY[i]) * fr2;
-            double hh = HH[i] + (HH[i+1] - HH[i]) * fr2;
-            RX[k] = rx; RY[k] = ry + sgn * hh * 0.88;
-            // ひれは体の波を受けて**基底に沿って波打つ**。先端ほど大きく揺れる
-            double rip = ripple * len * sin(2.0 * M_PI * t * 1.3 - f.phase * 1.0);
-            TX2[k] = RX[k] + dirx * len + uxs * rip;
-            TY2[k] = RY[k] + diry * len + uys * rip;
-        }
-        for (int k = 0; k < NQ; ++k) {
-            double v0 = (double)k / NQ, v1 = (double)(k + 1) / NQ;
-            tex_quad(RX[k], RY[k], TX2[k], TY2[k], TX2[k+1], TY2[k+1], RX[k+1], RY[k+1],
-                     0.0, 1.0, v0, v1, T, tw, th, aK * memF, shade, fog);
-        }
-    };
-    // 背びれ・尻びれ・腹びれ。腹びれは胸びれと同じ位相でゆっくり煽ぐ
-    auto outdir = [&](double sgn, double lean, double& dx2, double& dy2) {
-        dx2 = uxs * lean; dy2 = sgn + uys * lean;
-        double l2 = sqrt(dx2 * dx2 + dy2 * dy2); if (l2 < 1e-6) l2 = 1;
-        dx2 /= l2; dy2 /= l2;
-    };
-    { double dx2, dy2;
-      outdir(-1.0, 0.30, dx2, dy2);
-      photo_fin_dir(KINGYO_DORSAL, KINGYO_DORSAL_W, KINGYO_DORSAL_H, KINGYO_DORSAL_MET,
-                    -1.0, dx2, dy2, 1.00, 1.0, 0.13);
-      outdir(1.0, 0.34, dx2, dy2);
-      photo_fin_dir(KINGYO_ANAL, KINGYO_ANAL_W, KINGYO_ANAL_H, KINGYO_ANAL_MET,
-                    1.0, dx2, dy2, 1.00, 1.0, 0.16);
-      outdir(1.0, 0.30 + 0.10 * sin(f.pecPh * 0.7), dx2, dy2);
-      photo_fin_dir(KINGYO_PELVIC, KINGYO_PELVIC_W, KINGYO_PELVIC_H, KINGYO_PELVIC_MET,
-                    1.0, dx2, dy2, 1.00, 1.0, 0.11);
-    }
-    // 胸びれは前後に漕ぐ。止まっているときほど速い(ホバリング)。左右2枚。
-    // この写真の胸びれは薄くて切り出せなかった(11x32画素)ので、腹びれの写真を使う。
-    // どちらも扇形の対びれなので、形として無理がない
-    {
-        double sw = sin(f.pecPh);
-        const unsigned char* PT = KINGYO_PECTORAL;
-        int ptw = KINGYO_PECTORAL_W, pth = KINGYO_PECTORAL_H;
-        static float pmet[3];
-        pmet[0] = KINGYO_PECTORAL_MET[0]; pmet[1] = KINGYO_PECTORAL_MET[1]; pmet[2] = 0.26f;
-        if (KINGYO_PECTORAL_MET[0] < 0.10f) {          // 切り出せていない
-            PT = KINGYO_PELVIC; ptw = KINGYO_PELVIC_W; pth = KINGYO_PELVIC_H;
-            pmet[0] = KINGYO_PELVIC_MET[0] * 0.85f; pmet[1] = KINGYO_PELVIC_MET[1] * 0.85f;
-        }
-        // 胸びれは根元を軸に大きく漕ぐ。前へ出して水を掻き、後ろへ畳む
-        // **胸びれは根元を軸にぐるっと回す。** 寝かせ具合を変えるだけでは、
-        // 横から見たときにほとんど動いて見えない。前下方〜後下方まで 90度ほど振る
-        for (int sideI = 0; sideI < 2; ++sideI) {
-            double ph2 = f.pecPh + (sideI ? 0.0 : M_PI);       // 左右は逆位相
-            double ang = 1.05 * sin(ph2);                      // [rad] 前後への振り(大きく漕ぐ)
-            // 体の向きを基準に: 下向き(0,1) を、進行方向(-uxs,-uys) 側へ ang だけ回す
-            double dx2 = -uxs * sin(ang) + uys * 0.0;
-            double dy2 = cos(ang);
-            double bx2 = -uys, by2 = uxs;                       // 体の前後方向
-            dx2 = bx2 * (-sin(ang)) * 0.0 + (-uxs) * sin(ang);
-            dy2 = cos(ang);
-            double l2 = sqrt(dx2 * dx2 + dy2 * dy2); if (l2 < 1e-6) l2 = 1;
-            // 漕ぎの往復で見かけの長さも変わる(こちらを向くと短く見える)
-            double fore = 0.60 + 0.40 * fabs(cos(ph2));        // こちらを向くと短く見える
-            photo_fin_dir(PT, ptw, pth, pmet, 1.0, dx2 / l2, dy2 / l2,
-                          sideI ? 1.00 : 0.70, fore, 0.05);
-        }
-    }
-#else
     // 写真が無いときは手続きで描く(形は出るが、板に見える)
     auto finstrip = [&](double s0, double s1, double sgn, double hMax, double lean,
                         int memA, int rayA) {
@@ -1095,9 +949,7 @@ static void draw_fish(const Fish& f) {
                 (int)(150 * side2), (int)(24 * side2));
         }
     }
-#endif
 
-#if !HAVE_PHOTO
     // --- 目。**写真を貼っているときは描かない**(写真に目が写っているので二重になる)
     {
         double along = f.L * (0.46 - 0.085 * 0.9);
@@ -1117,8 +969,9 @@ static void draw_fish(const Fish& f) {
             olivec_circle(OC, (int)(ex - er * 0.28), (int)(ey - er * 0.30), std::max(1, (int)(er * 0.3)),
                           rgb(225, 233, 238));
     }
-#endif
 }
+
+#endif
 
 // ---------------------------------------------------------------- 近傍探索
 // 群れの計算は「見える距離(Rsee)にいる仲間」だけを見る。総当たりだと N² で、
