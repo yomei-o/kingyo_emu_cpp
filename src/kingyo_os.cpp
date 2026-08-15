@@ -553,9 +553,17 @@ static void draw_fish(const Fish& f) {
     // 朱の個体は朱いひれ、白勝ちの個体は白いひれになる(テトラのような青白ではない)
     int br_, bg_, bb_;
     tex_color(0.10, 0.86, br_, bg_, bb_);
+#if HAVE_PHOTO
+    // 写真から取ったひれの平均色。手で決めた色だと、魚を差し替えたときに合わなくなる
+    double fq = (0.62 + 0.38 * side) * (1 - fog);
+    int fr  = (int)(KINGYO_FIN[0] * fq + 14 * fog);
+    int fg2 = (int)(KINGYO_FIN[1] * fq + 44 * fog);
+    int fb  = (int)(KINGYO_FIN[2] * fq + 48 * fog);
+#else
     int fr  = (int)(br_ * 0.78 + 255 * 0.22);
     int fg2 = (int)(bg_ * 0.78 + 205 * 0.22);
     int fb  = (int)(bb_ * 0.78 + 165 * 0.22);
+#endif
     // 根元(rx,ry)から out 方向へ len だけ伸び、spr 方向へ ±half に開く扇。
     // notch>0 で後縁の中央がえぐれる(尾びれの二叉)。鰭条を細い三角形で重ねる。
     auto fan = [&](double rx, double ry, double ox, double oy, double px2, double py2,
@@ -638,7 +646,7 @@ static void draw_fish(const Fish& f) {
         double TLx = LX[NF] + dxE * tipL * 0.94 - NX[NF] * 0.045 * f.L * sc0;
         double TLy = LY[NF] + dyE * tipL * 0.94 - NY[NF] * 0.045 * f.L * sc0;
 
-        int memT = (int)(215 * memF), memT2 = (int)(145 * memF);
+        int memT = (int)(170 * memF), memT2 = (int)(110 * memF);
         for (int k = 0; k < NF; ++k) {
             uint32_t c = rgba(fr, fg2, fb, k < NF - 2 ? memT : memT2);   // 先ほど薄い
             tri(FX[k], FY[k], UX[k], UY[k], UX[k+1], UY[k+1], c);
@@ -717,13 +725,13 @@ static void draw_fish(const Fish& f) {
     };
 
     // --- 背びれ。和金は背びれが高く、基底も長い(胴の 3〜6割)
-    finstrip(0.30, 0.62, -1.0, 0.175 * f.L * sc0, 0.55, 205, 22);
+    finstrip(0.30, 0.62, -1.0, 0.175 * f.L * sc0, 0.55, 165, 26);
     // --- 尻びれ(短い基底)
-    finstrip(0.72, 0.86,  1.0, 0.105 * f.L * sc0, 0.60, 195, 20);
+    finstrip(0.72, 0.86,  1.0, 0.105 * f.L * sc0, 0.60, 155, 24);
     // --- 腹びれ。胸びれより後ろ、腹の下
     {
         double sw = sin(f.pecPh * 0.7) * 0.10;
-        finstrip(0.50, 0.60, 1.0, (0.085 + sw) * f.L * sc0, 0.75, 185, 18);
+        finstrip(0.50, 0.60, 1.0, (0.085 + sw) * f.L * sc0, 0.75, 150, 22);
     }
     // --- 胸びれ。**金魚はこれで細かく漕いで、その場に留まったり後退したりする。**
     // 前後に扇ぐので、止まっているときほど忙しなく動く
@@ -737,7 +745,7 @@ static void draw_fish(const Fish& f) {
             double ol = sqrt(ox * ox + oy * oy); if (ol < 1e-6) ol = 1;
             fan(SX[k0], SY[k0] + HH[k0] * 0.34, ox / ol, oy / ol, uxs, uys,
                 0.105 * f.L * sc0 * side2, 0.048 * f.L * sc0 * side2, 0.0, 5,
-                (int)(185 * side2), (int)(20 * side2));
+                (int)(150 * side2), (int)(24 * side2));
         }
     }
     // --- 目
