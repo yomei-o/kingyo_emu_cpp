@@ -55,7 +55,7 @@
 <!-- sim.js / sim.wasm はファイル名が変わらないので、ブラウザが古いものを 10 分使い回す
      (GitHub Pages の Cache-Control: max-age=600)。index.html だけ新しくなると、
      新しいスライダが古い wasm を叩いて「動かしても何も起きない」になる。更新したら v を上げる。 -->
-<script src="sim.js?v=3"></script>
+<script src="sim.js?v=5"></script>
 <script>
 "use strict";
 const SLIDERS = [
@@ -71,7 +71,7 @@ const $=id=>document.getElementById(id);
 const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
 let M=null, api={}, W=0, H=0, img=null, playing=true, frames=0, lastT=0, fpsAvg=0, lag=0;
 
-createSim({locateFile:(p,dir)=>dir+p+"?v=3"}).then(mod=>{
+createSim({locateFile:(p,dir)=>dir+p+"?v=5"}).then(mod=>{
   M=mod;
   api.init  =M.cwrap("sim_init","number",["number","number"]);
   api.w     =M.cwrap("sim_w","number",[]);

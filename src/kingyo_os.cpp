@@ -190,6 +190,13 @@ static const double BODY_W = 0.62;    // 体の厚み / 体高
 // ひれは体の延長で、波はそのまま尾びれへ伝わっていく。s が大きいほど位相が遅れるので、
 // 尾びれは体に**遅れてなびく**。金魚らしさはほとんどこれで決まる
 // (剛体の扇を尾柄に貼ると、板を振っているようにしか見えない)。
+// ひれの中を伝わる波。**ひれは体より柔らかい**ので、同じ長さでも位相が余計に遅れ、
+// 先へ行くほど大きく振れる。金魚の尾が「波打つように」曲がるのはこれ。
+// q: 0=付け根 1=先端 / lagK: 遅れの強さ / ampK: 先端での振幅の伸び
+static inline double fin_wave(double q, double phase, double amp, double lagK, double ampK) {
+    double a = amp * (1.0 + ampK * q * q);
+    return a * sin(2.0 * M_PI * (1.0 + q * lagK) / 1.15 - phase);
+}
 static inline double body_wave(double s, double phase, double amp, double bend) {
     double a = amp * pow(s, 2.0);
     return a * sin(2.0 * M_PI * s / 1.15 - phase) + bend * s * s;
@@ -404,10 +411,262 @@ static inline void tri(double x1, double y1, double x2, double y2, double x3, do
                     (int)llround(x3), (int)llround(y3), c);
 }
 
+// ---------------------------------------------------------------- ひれを貼る
+// 写真から切り出したひれ(α 付き)を、曲がった四角形に貼る。
+// 形は α が持つので、まっすぐな縁の板にならない。u=根元0→先1、v=帯の片側0→反対1。
+static void tex_tri(double x0,double y0,double u0,double v0,
+                    double x1,double y1,double u1,double v1,
+                    double x2,double y2,double u2,double v2,
+                    const unsigned char* T, int tw, int th,
+                    double aK, double shade, double fog) {
+    double minx = std::min(x0, std::min(x1, x2)), maxx = std::max(x0, std::max(x1, x2));
+    double miny = std::min(y0, std::min(y1, y2)), maxy = std::max(y0, std::max(y1, y2));
+    int xa = (int)floor(minx), xb = (int)ceil(maxx), ya = (int)floor(miny), yb = (int)ceil(maxy);
+    if (xb < 0 || yb < 0 || xa >= FW || ya >= FH) return;
+    xa = std::max(0, xa); ya = std::max(0, ya); xb = std::min(FW - 1, xb); yb = std::min(FH - 1, yb);
+    double d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    if (fabs(d) < 1e-9) return;
+    for (int y = ya; y <= yb; ++y) for (int x = xa; x <= xb; ++x) {
+        double px2 = x + 0.5, py2 = y + 0.5;
+        double l0 = ((y1 - y2) * (px2 - x2) + (x2 - x1) * (py2 - y2)) / d;
+        double l1 = ((y2 - y0) * (px2 - x2) + (x0 - x2) * (py2 - y2)) / d;
+        double l2 = 1.0 - l0 - l1;
+        if (l0 < -0.002 || l1 < -0.002 || l2 < -0.002) continue;
+        double u = l0 * u0 + l1 * u1 + l2 * u2, v = l0 * v0 + l1 * v1 + l2 * v2;
+        double tu = u * (tw - 1), tv = v * (th - 1);
+        int i0 = clampi((int)tu, 0, tw - 2), j0 = clampi((int)tv, 0, th - 2);
+        double ft = tu - i0, gt = tv - j0;
+        const unsigned char* a = &T[((size_t)j0 * tw + i0) * 4];
+        const unsigned char* b = a + 4;
+        const unsigned char* c = &T[((size_t)(j0 + 1) * tw + i0) * 4];
+        const unsigned char* e = c + 4;
+        double w00 = (1-ft)*(1-gt), w10 = ft*(1-gt), w01 = (1-ft)*gt, w11 = ft*gt;
+        double al = (a[3]*w00 + b[3]*w10 + c[3]*w01 + e[3]*w11) / 255.0 * aK;
+        if (al < 0.01) continue;
+        double r = (a[0]*w00 + b[0]*w10 + c[0]*w01 + e[0]*w11) * shade;
+        double g = (a[1]*w00 + b[1]*w10 + c[1]*w01 + e[1]*w11) * shade;
+        double bl= (a[2]*w00 + b[2]*w10 + c[2]*w01 + e[2]*w11) * shade;
+        blend_px(x, y, (int)(r * (1 - fog) + 14 * fog),
+                       (int)(g * (1 - fog) + 44 * fog),
+                       (int)(bl * (1 - fog) + 48 * fog), al);
+    }
+}
+static void tex_quad(double ax,double ay,double bx,double by,double cx,double cy,double dx2,double dy2,
+                     double u0,double u1,double v0,double v1,
+                     const unsigned char* T,int tw,int th,double aK,double shade,double fog) {
+    tex_tri(ax,ay,u0,v0, bx,by,u1,v0, cx,cy,u1,v1, T,tw,th,aK,shade,fog);
+    tex_tri(ax,ay,u0,v0, cx,cy,u1,v1, dx2,dy2,u0,v1, T,tw,th,aK,shade,fog);
+}
+
 // ---------------------------------------------------------------- 1匹描く
 // 体は「縦スパン + 被覆率」で自前に塗る。上下の輪郭がアンチエイリアスされ、
 // 体色も v(背=-1 〜 腹=+1) の連続関数として出せるので、帯のベタ塗りにならない。
+
+#if HAVE_PHOTO && defined(KINGYO_HAS_FULL)
+// ---------------------------------------------------------------- 写真1枚を曲げて描く
+// 体を短冊に展開し、ひれを別々に貼る作りは、写真の「魚らしさ」を分解してしまう。
+// 頭の丸み・ひれの付き方・目の位置がそれぞれ別に近似され、どこかが必ず嘘になる。
+// ここでは**写真1枚をそのまま格子に貼り、格子を波で曲げる**。
+// 出てくる絵は写真そのもので、曲がり方だけがこちらの計算。
+//
+// 格子の各点は「スプライト上の位置(u,v)」から:
+//   u → s(鼻先0 尾柄1、尾びれは1超) → 体軸に沿った位置と、波による横のずれ
+//   v → 体の中心線からの上下のずれ
+// さらに**写真から測った輪郭より外にある点はひれ**とみなし、余分に揺らす。
+// こうすると胸びれも腹びれも尻びれも、切り出さずに動く。
+static bool p_warp = true;
+
+// 格子の三角形を1枚塗る。**明るさと透け具合も頂点で持って補間する。**
+// 面ごとに1つの値にすると、格子の目がそのまま縞になって出る
+// (胴の丸みも、ひれの透け方も、格子より細かく変わるので面単位では足りない)
+static void warp_tri(const double* X, const double* Y, const double* U, const double* V,
+                     const double* S, const double* A, double fog) {
+    double minx = std::min(X[0], std::min(X[1], X[2])), maxx = std::max(X[0], std::max(X[1], X[2]));
+    double miny = std::min(Y[0], std::min(Y[1], Y[2])), maxy = std::max(Y[0], std::max(Y[1], Y[2]));
+    int xa = (int)floor(minx), xb = (int)ceil(maxx), ya = (int)floor(miny), yb = (int)ceil(maxy);
+    if (xb < 0 || yb < 0 || xa >= FW || ya >= FH) return;
+    xa = std::max(0, xa); ya = std::max(0, ya); xb = std::min(FW - 1, xb); yb = std::min(FH - 1, yb);
+    double d = (Y[1] - Y[2]) * (X[0] - X[2]) + (X[2] - X[1]) * (Y[0] - Y[2]);
+    if (fabs(d) < 1e-9) return;
+    const int tw = KINGYO_FULL_W, th = KINGYO_FULL_H;
+    for (int y = ya; y <= yb; ++y) for (int x = xa; x <= xb; ++x) {
+        double px2 = x + 0.5, py2 = y + 0.5;
+        double l0 = ((Y[1] - Y[2]) * (px2 - X[2]) + (X[2] - X[1]) * (py2 - Y[2])) / d;
+        double l1 = ((Y[2] - Y[0]) * (px2 - X[2]) + (X[0] - X[2]) * (py2 - Y[2])) / d;
+        double l2 = 1.0 - l0 - l1;
+        if (l0 < 0.0 || l1 < 0.0 || l2 < 0.0) continue;
+        double u = l0 * U[0] + l1 * U[1] + l2 * U[2], v = l0 * V[0] + l1 * V[1] + l2 * V[2];
+        double sh = l0 * S[0] + l1 * S[1] + l2 * S[2], ak = l0 * A[0] + l1 * A[1] + l2 * A[2];
+        double tu = u * (tw - 1), tv = v * (th - 1);
+        int i0 = clampi((int)tu, 0, tw - 2), j0 = clampi((int)tv, 0, th - 2);
+        double ft = tu - i0, gt = tv - j0;
+        const unsigned char* a = &KINGYO_FULL[((size_t)j0 * tw + i0) * 4];
+        const unsigned char* b = a + 4;
+        const unsigned char* c = &KINGYO_FULL[((size_t)(j0 + 1) * tw + i0) * 4];
+        const unsigned char* e = c + 4;
+        double w00 = (1-ft)*(1-gt), w10 = ft*(1-gt), w01 = (1-ft)*gt, w11 = ft*gt;
+        double al = (a[3]*w00 + b[3]*w10 + c[3]*w01 + e[3]*w11) / 255.0 * ak;
+        if (al < 0.008) continue;
+        double r = (a[0]*w00 + b[0]*w10 + c[0]*w01 + e[0]*w11) * sh;
+        double g = (a[1]*w00 + b[1]*w10 + c[1]*w01 + e[1]*w11) * sh;
+        double bl= (a[2]*w00 + b[2]*w10 + c[2]*w01 + e[2]*w11) * sh;
+        blend_px(x, y, (int)(r * (1 - fog) + 14 * fog),
+                       (int)(g * (1 - fog) + 44 * fog),
+                       (int)(bl * (1 - fog) + 48 * fog), al);
+    }
+}
+
+static void draw_fish_full(const Fish& f) {
+    const float* M = KINGYO_FULL_MET;      // 鼻先u, 尾柄u, 中心線v, 幅/体長, 縦横比
+    const double U0 = M[0], U1 = M[1], VA = M[2];
+    const double HB = M[3] * M[4];         // スプライトの高さ / 体長
+    const double SEND = 1.0 + (1.0 - U1) / (U1 - U0);   // 画像の右端に当たる s
+
+    double cy = cos(f.yaw), sy = sin(f.yaw);
+    double fx = cy * cos(f.pitch), fy = sin(f.pitch), fz = sy * cos(f.pitch);
+    double ax = -sy, az = cy;
+
+    double csx, csy, sc0;
+    project(f.x, f.y, f.z, csx, csy, sc0);
+    double lenpx = f.L * sc0;
+    const int NXG = clampi((int)(lenpx / 8.0), 8, 40);   // 画面で小さい魚は粗くてよい
+    const int NYG = clampi((int)(lenpx / 15.0), 4, 20);
+    static const int MXG = 41, MYG = 21;
+    double PX2[MXG][MYG], PY2[MXG][MYG];
+    double RND[MXG][MYG], ALP[MXG][MYG];   // 断面の丸みによる陰影 / ひれの透け具合
+    double WXc[MXG], WZc[MXG], CSH[MXG];   // 列ごとの世界座標と、体側の向きによる明るさ
+
+    double amp  = 0.070 * f.L * f.ampS;
+    double bodyW = 0.9 * f.L;              // 鼻先〜尾柄の長さ [m]
+    double dep = std::max(0.0, std::min(1.0, f.z / TD));
+    double fog = 0.62 * dep * p_murk;
+
+    for (int i = 0; i <= NXG; ++i) {
+        double u = (double)i / NXG;
+        double sq = (u - U0) / (U1 - U0);
+        double along0 = f.L * (0.46 - sq * 0.9);
+        // 体の波 → 尾びれのしなりへ。ひれは体より柔らかいので余計に遅れる
+        double q = std::max(0.0, (sq - 1.0) / std::max(1e-6, SEND - 1.0));
+        double lat0 = body_wave(std::min(1.0, std::max(0.0, sq)) * 0.9, f.phase, amp, f.bend) * (1.0 - q)
+                    + fin_wave(q, f.phase, amp, 1.6, 1.8) * q;
+        // 写真から測った輪郭。ここより外はひれ
+        double u2 = std::min(1.0, std::max(0.0, sq)) * KINGYO_NSEG;
+        int i2 = clampi((int)u2, 0, KINGYO_NSEG - 1);
+        double fr3 = u2 - i2;
+        double midv  = (KINGYO_MID[i2]  + (KINGYO_MID[i2+1]  - KINGYO_MID[i2])  * fr3) / HB;
+        double halfv = (KINGYO_BOT[i2] + (KINGYO_BOT[i2+1] - KINGYO_BOT[i2]) * fr3) / HB;
+        if (sq > 1.0) halfv *= std::max(0.15, 1.0 - (sq - 1.0) * 2.0);   // 尾柄から先は体でない
+        double swing = sin(f.pecPh + sq * 2.6);        // ひれごとに位相をずらす
+        // 体は板ではなく**断面が楕円の筒**。見えているのは手前半分なので、
+        // 各点をカメラ側へ膨らませる。こうすると斜めを向いたときに
+        // 胴が短くなるだけでなく**幅を持ったまま回る**(平面のままだと紙が回るだけ)
+        double wx0 = f.x + fx * along0 + ax * lat0;
+        double wz0 = f.z + fz * along0 + az * lat0;
+        double toCam = ax * (0.0 - wx0) + az * (-CAMD * NWATER - wz0);
+        double bulgeSgn = (toCam >= 0.0) ? 1.0 : -1.0;
+        double halfThick = 0.62 * halfv * HB * bodyW * f.girth;   // 体の厚みの半分 [m]
+        for (int j = 0; j <= NYG; ++j) {
+            double v = (double)j / NYG;
+            double dv = v - (VA + midv);
+            double out = fabs(dv) - halfv;             // >0 ならひれ
+            double along = along0, lat = lat0, dvv = dv;
+            if (out > 0.0) {
+                double ow = out * HB * bodyW;          // 世界座標でのひれの張り出し [m]
+                double k = std::min(1.0, out / 0.22);
+                dvv = (dv < 0 ? -1.0 : 1.0) * (halfv + out * (1.0 + 0.13 * swing));  // 扇が開閉する
+                along -= 0.28 * ow * k * swing;        // 後ろへ流れる
+                lat   += 0.85 * ow * k * swing;        // 横に煽ぐ
+            }
+            double yoff = -dvv * HB * bodyW * f.girth;
+            double t2 = dv / std::max(1e-6, halfv);
+            double nz0 = (out > 0.0) ? 0.0 : sqrt(std::max(0.0, 1.0 - t2 * t2));
+            double blg = bulgeSgn * halfThick * nz0;   // カメラ側への膨らみ
+            double sxp, syp, scp;
+            project(f.x + fx * along + ax * (lat + blg), f.y + fy * along + yoff,
+                    f.z + fz * along + az * (lat + blg), sxp, syp, scp);
+            PX2[i][j] = sxp; PY2[i][j] = syp;
+            // 断面は楕円。**写真をそのまま貼ると板に見える**ので、
+            // 中心線から縁へ行くほど法線が寝る = 暗くなる ぶんを掛ける。
+            // 少し背中寄りに濡れた体の照り返しを足す
+            if (out > 0.0) {
+                RND[i][j] = 0.80;                      // ひれは平らな膜
+                // ひれは薄い膜。**黄色いひれは彩度が高いので、写真の明るさから
+                // 透け具合を測ると「不透明」と出てしまう**。張り出しの量から決める
+                ALP[i][j] = std::max(0.30, 0.90 - 0.55 * std::min(1.0, out / 0.25));
+            } else {
+                // 法線は「横向き成分 nz0 + 上下成分 -t2」。上からの光で背が明るく、
+                // 縁に行くほど法線が寝て暗くなる。濡れた体の照りは背中寄りに出る
+                RND[i][j] = 0.62 + 0.30 * nz0 + 0.12 * std::max(0.0, -t2)
+                          + 0.16 * exp(-((t2 + 0.40) * (t2 + 0.40)) / 0.05) * nz0;
+                ALP[i][j] = 1.0;
+            }
+        }
+        WXc[i] = f.x + fx * along0 + ax * lat0;
+        WZc[i] = f.z + fz * along0 + az * lat0;
+    }
+    // 列ごとの体側の向き。**曲がった胴は、こちらを向いた側が明るくなる**。
+    // 1枚の絵をただ曲げるだけでは出ない「厚みのある体が泳いでいる」感じは、ほぼこれで出る
+    for (int i = 0; i <= NXG; ++i) {
+        int a2 = std::max(0, i - 1), b2 = std::min(NXG, i + 1);
+        double tx = WXc[b2] - WXc[a2], tz = WZc[b2] - WZc[a2];
+        double tl = sqrt(tx * tx + tz * tz); if (tl < 1e-9) { tx = fx; tz = fz; tl = 1; }
+        double nx = -tz / tl, nz2 = tx / tl;             // 体側の法線(水平面内)
+        double ex = 0.0 - WXc[i], ez = -CAMD * NWATER - WZc[i];
+        double el = sqrt(ex * ex + ez * ez); if (el < 1e-9) el = 1;
+        double sd = fabs((nx * ex + nz2 * ez) / el);     // 1=真横を向いている
+        CSH[i] = (0.62 + 0.44 * pow(sd, 0.7)) * f.tint;
+    }
+    // 正面を向いた魚が線に潰れないようにする(魚は板ではなく厚みがある)
+    {
+        double dmin = PX2[0][0], dmax = PX2[0][0], cx = 0.0; int cnt = 0;
+        for (int i = 0; i <= NXG; ++i) for (int j = 0; j <= NYG; ++j) {
+            dmin = std::min(dmin, PX2[i][j]); dmax = std::max(dmax, PX2[i][j]);
+            cx += PX2[i][j]; cnt++;
+        }
+        cx /= cnt;
+        double thick = BODY_W * BODY_H * f.girth * f.L * sc0;
+        double len = dmax - dmin;
+        if (len > 1e-6 && len < thick) {
+            double k = thick / len;
+            for (int i = 0; i <= NXG; ++i) for (int j = 0; j <= NYG; ++j)
+                PX2[i][j] = cx + (PX2[i][j] - cx) * k;
+        }
+    }
+    // 斜めを向くと頭と尾が画面で重なる。**奥の列から描かないと、
+    // 奥にある尾が手前の頭を塗りつぶす**
+    double dH = WXc[0] * WXc[0] + (WZc[0] + CAMD * NWATER) * (WZc[0] + CAMD * NWATER);
+    double dT = WXc[NXG] * WXc[NXG] + (WZc[NXG] + CAMD * NWATER) * (WZc[NXG] + CAMD * NWATER);
+    bool headFirst = (dH > dT);              // 頭のほうが奥なら頭から
+    for (int ii = 0; ii < NXG; ++ii) {
+        int i = headFirst ? ii : (NXG - 1 - ii);
+        double u0 = (double)i / NXG, u1 = (double)(i + 1) / NXG;
+        for (int j = 0; j < NYG; ++j) {
+            double v0 = (double)j / NYG, v1 = (double)(j + 1) / NYG;
+            double X4[4] = {PX2[i][j], PX2[i+1][j], PX2[i+1][j+1], PX2[i][j+1]};
+            double Y4[4] = {PY2[i][j], PY2[i+1][j], PY2[i+1][j+1], PY2[i][j+1]};
+            double U4[4] = {u0, u1, u1, u0}, V4[4] = {v0, v0, v1, v1};
+            double S4[4] = {CSH[i] * RND[i][j],     CSH[i+1] * RND[i+1][j],
+                            CSH[i+1] * RND[i+1][j+1], CSH[i] * RND[i][j+1]};
+            double A4[4] = {ALP[i][j], ALP[i+1][j], ALP[i+1][j+1], ALP[i][j+1]};
+            const int T1[3] = {0, 1, 2}, T2[3] = {0, 2, 3};
+            for (int p = 0; p < 2; ++p) {
+                const int* T = p ? T2 : T1;
+                double xx[3], yy[3], uu[3], vv[3], ss[3], aa[3];
+                for (int k = 0; k < 3; ++k) {
+                    xx[k] = X4[T[k]]; yy[k] = Y4[T[k]]; uu[k] = U4[T[k]];
+                    vv[k] = V4[T[k]]; ss[k] = S4[T[k]]; aa[k] = A4[T[k]];
+                }
+                warp_tri(xx, yy, uu, vv, ss, aa, fog);
+            }
+        }
+    }
+}
+#endif
+
 static void draw_fish(const Fish& f) {
+#if HAVE_PHOTO && defined(KINGYO_HAS_FULL)
+    if (p_warp) { draw_fish_full(f); return; }
+#endif
     const int NS = 26;
     double cy = cos(f.yaw), sy = sin(f.yaw);
     double fx = cy * cos(f.pitch), fy = sin(f.pitch), fz = sy * cos(f.pitch);
@@ -422,7 +681,21 @@ static void draw_fish(const Fish& f) {
         double sc;
         project(f.x + fx * along + ax * lat, f.y + fy * along, f.z + fz * along + az * lat,
                 SX[i], SY[i], sc);
+#if HAVE_PHOTO && defined(KINGYO_HAS_PROFILE)
+        // 体の輪郭は**写真から測ったもの**を使う。手で決めた体型に写真のひれを付けると、
+        // 付け根が体から浮いたり食い込んだりする(写真とプロポーションが違うため)
+        {
+            double u2 = s * KINGYO_NSEG;
+            int i2 = clampi((int)u2, 0, KINGYO_NSEG - 1);
+            double fr3 = u2 - i2;
+            double mid = KINGYO_MID[i2] + (KINGYO_MID[i2+1] - KINGYO_MID[i2]) * fr3;
+            double hlf = KINGYO_BOT[i2] + (KINGYO_BOT[i2+1] - KINGYO_BOT[i2]) * fr3;
+            SY[i] += mid * f.L * f.girth * sc;          // 上下の中点へずらす
+            HH[i]  = hlf * f.L * f.girth * sc;
+        }
+#else
         HH[i] = 0.5 * body_height(s) * BODY_H * f.girth * f.L * sc;
+#endif
     }
 
     // 正面を向いた魚が線に潰れないようにする。魚はリボン(板)ではなく厚みのある体なので、
@@ -503,6 +776,16 @@ static void draw_fish(const Fish& f) {
         double gill = smoothstep(gs - 0.022, gs, s) * (1.0 - smoothstep(gs, gs + 0.022, s));
         r *= 1.0 - 0.10 * gill; g *= 1.0 - 0.10 * gill; bl *= 1.0 - 0.10 * gill;
 #endif
+        // ---- 丸み。写真をそのまま貼ると板に見えるので、断面の丸さぶんの陰影を足す。
+        // 体は横から見ると楕円なので、v(背-1〜腹+1) の位置で「こちらを向いている度合い」が
+        // 決まる: nz = sqrt(1-v^2)。縁ほど光が回り込まず暗くなり、中ほどは明るい。
+        // さらに体側の上寄りに、丸い面が光を返す帯(ハイライト)が出る
+        double nz = sqrt(std::max(0.0, 1.0 - v * v));
+        double round_ = 0.70 + 0.30 * nz;                    // 縁が落ちる
+        double spec = exp(-((v + 0.30) * (v + 0.30)) / 0.055) * 0.20 * (0.5 + 0.5 * side);
+        r = r * round_ + 255 * spec;
+        g = g * round_ + 246 * spec;
+        bl = bl * round_ + 232 * spec;
         r *= shade; g *= shade; bl *= shade;
         R = (int)(r * (1 - fog) + 14 * fog);
         G = (int)(g * (1 - fog) + 44 * fog);
@@ -606,90 +889,162 @@ static void draw_fish(const Fish& f) {
     uxs /= ul2; uys /= ul2;
     double sc0 = HH[6] / std::max(1e-9, 0.5 * body_height(6.0 / NS) * BODY_H * f.girth * f.L); // 画面倍率
 
-    // --- 尾びれ。**体の波の続き**として、s=1 の先の中心線を出してから膜を張る。
+    // --- 尾びれ。**体の波の続き**として、s=1 の先の中心線を出してから貼る。
     // 剛体の扇を尾柄に貼ると板を振っているようにしか見えない。金魚は尾が長いので、
     // 体が振り終わった後から尾が遅れて返ってくる。この遅れは進行波の位相差で自然に出る。
     {
-        const int NF = 6;                       // 尾びれの中心線の分割
-        const double SEND = 1.30;               // s の終点(体は 1.0)。0.9 倍して長さになる
-        double FX[NF + 1], FY[NF + 1];
+        const int NF = 7;                        // 尾びれの中心線の分割
+#if HAVE_PHOTO && defined(KINGYO_NFIN)
+        const double SEND = 1.0 + KINGYO_CAUDAL_MET[0] / 0.9;    // 写真での長さに合わせる
+#else
+        const double SEND = 1.30;
+#endif
+        double FX[NF + 1], FY[NF + 1], NX[NF + 1], NY[NF + 1];
         for (int k = 0; k <= NF; ++k) {
-            double s = 1.0 + (SEND - 1.0) * (double)k / NF;
-            double lat = body_wave(s * 0.9, f.phase, amp, f.bend);
-            double along = f.L * (0.46 - s * 0.9);
+            double sq = 0.930 + (SEND - 0.930) * (double)k / NF;   // 少し重ねて隙間を消す
+            double q = std::max(0.0, (sq - 1.0) / std::max(1e-6, SEND - 1.0));   // 0=付け根 1=先
+            // 付け根では体の波、そこから先は**ひれのしなり**へなめらかに移る
+            double lat = body_wave(std::min(1.0, sq) * 0.9, f.phase, amp, f.bend) * (1.0 - q)
+                       + fin_wave(q, f.phase, amp, 1.6, 1.8) * q;
+            double along = f.L * (0.46 - sq * 0.9);
             double sc;
             project(f.x + fx * along + ax * lat, f.y + fy * along,
                     f.z + fz * along + az * lat, FX[k], FY[k], sc);
         }
-        // 上下の縁。根元は細く、先へ行くほど広がる。
-        // 和金の尾は**二叉**で、上下の葉が後ろへ長く伸び、その間が V にえぐれる。
-        // 葉の先は中心線の終点よりさらに後ろまで出る(ここを作らないとただの三角形になる)
-        double UX[NF + 1], UY[NF + 1], LX[NF + 1], LY[NF + 1], NX[NF + 1], NY[NF + 1];
         for (int k = 0; k <= NF; ++k) {
             int a2 = std::max(0, k - 1), b2 = std::min(NF, k + 1);
             double tx = FX[b2] - FX[a2], ty = FY[b2] - FY[a2];
             double tl = sqrt(tx * tx + ty * ty); if (tl < 1e-6) { tx = uxs; ty = uys; tl = 1; }
             NX[k] = -ty / tl; NY[k] = tx / tl;
+        }
+        // 上の葉と下の葉で遅れが違うので、尾は面としてねじれる。
+        // 横から見たときに「ひらひら」して見えるのはこのねじれ
+        double twist[NF + 1];
+        for (int k = 0; k <= NF; ++k) {
+            double q = (double)k / NF;
+            twist[k] = 0.085 * f.L * sc0 * q * q * sin(f.phase * 0.85 - q * 2.2);
+        }
+#if HAVE_PHOTO && defined(KINGYO_NFIN)
+        // 写真の尾。幅は写真の比率そのまま。形も透け方も α が持っている
+        double hw = KINGYO_CAUDAL_MET[1] * f.L * sc0 * 0.5;
+        for (int k = 0; k < NF; ++k) {
+            double u0 = (double)k / NF, u1 = (double)(k + 1) / NF;
+            // 上の葉は +twist、下の葉は -twist だけ前後にずれる = 面がねじれる
+            tex_quad(FX[k]   + NX[k]   * hw + uxs * twist[k],   FY[k]   + NY[k]   * hw + uys * twist[k],
+                     FX[k+1] + NX[k+1] * hw + uxs * twist[k+1], FY[k+1] + NY[k+1] * hw + uys * twist[k+1],
+                     FX[k+1] - NX[k+1] * hw - uxs * twist[k+1], FY[k+1] - NY[k+1] * hw - uys * twist[k+1],
+                     FX[k]   - NX[k]   * hw - uxs * twist[k],   FY[k]   - NY[k]   * hw - uys * twist[k],
+                     u0, u1, 0.0, 1.0,
+                     KINGYO_CAUDAL, KINGYO_CAUDAL_W, KINGYO_CAUDAL_H,
+                     1.00 * memF, shade, fog);
+        }
+#else
+        double UX[NF + 1], UY[NF + 1], LX[NF + 1], LY[NF + 1];
+        for (int k = 0; k <= NF; ++k) {
             double q = (double)k / NF;
             double w = (0.042 + 0.150 * q * q) * f.L * sc0;
             UX[k] = FX[k] + NX[k] * w; UY[k] = FY[k] + NY[k] * w;
             LX[k] = FX[k] - NX[k] * w; LY[k] = FY[k] - NY[k] * w;
         }
-        // 葉の先。中心線の向きへさらに伸ばす
-        double dxE = FX[NF] - FX[NF-1], dyE = FY[NF] - FY[NF-1];
-        double dlE = sqrt(dxE*dxE + dyE*dyE); if (dlE < 1e-6) { dxE = uxs; dyE = uys; dlE = 1; }
-        dxE /= dlE; dyE /= dlE;
-        // 葉先は上のほうが少し長い(実物も左右上下で揃っていない)
-        double tipL = 0.26 * f.L * sc0;
-        double TUx = UX[NF] + dxE * tipL * 1.06 + NX[NF] * 0.045 * f.L * sc0;
-        double TUy = UY[NF] + dyE * tipL * 1.06 + NY[NF] * 0.045 * f.L * sc0;
-        double TLx = LX[NF] + dxE * tipL * 0.94 - NX[NF] * 0.045 * f.L * sc0;
-        double TLy = LY[NF] + dyE * tipL * 0.94 - NY[NF] * 0.045 * f.L * sc0;
-
         int memT = (int)(170 * memF), memT2 = (int)(110 * memF);
         for (int k = 0; k < NF; ++k) {
-            uint32_t c = rgba(fr, fg2, fb, k < NF - 2 ? memT : memT2);   // 先ほど薄い
+            uint32_t c = rgba(fr, fg2, fb, k < NF - 2 ? memT : memT2);
             tri(FX[k], FY[k], UX[k], UY[k], UX[k+1], UY[k+1], c);
             tri(FX[k], FY[k], UX[k+1], UY[k+1], FX[k+1], FY[k+1], c);
             tri(FX[k], FY[k], LX[k], LY[k], LX[k+1], LY[k+1], c);
             tri(FX[k], FY[k], LX[k+1], LY[k+1], FX[k+1], FY[k+1], c);
         }
-        // 二叉の葉先(ここだけ薄く。実物も先は透けている)
-        uint32_t ct = rgba(fr, fg2, fb, memT2);
-        tri(FX[NF], FY[NF], UX[NF], UY[NF], TUx, TUy, ct);
-        tri(FX[NF], FY[NF], LX[NF], LY[NF], TLx, TLy, ct);
-        // 鰭条 — 曲がった中心線に沿って走らせる。なびきが読めるようになる
-        if (rayF > 0.02) {
-            int rayT = (int)(16 * rayF);
-            const int NR = 4;
-            for (int r = 1; r <= NR; ++r) {
-                double t = (double)r / NR;
-                for (int side = 0; side < 2; ++side) {
-                    double px0 = 0, py0 = 0;
-                    for (int k = 0; k <= NF; ++k) {
-                        double exx = side ? UX[k] : LX[k], eyy = side ? UY[k] : LY[k];
-                        double qx = FX[k] + (exx - FX[k]) * t, qy = FY[k] + (eyy - FY[k]) * t;
-                        if (k > 0) {
-                            double vx2 = qx - px0, vy2 = qy - py0;
-                            double vl2 = sqrt(vx2*vx2 + vy2*vy2);
-                            if (vl2 > 1e-6) {
-                                double wx2 = -vy2 / vl2 * 0.6, wy2 = vx2 / vl2 * 0.6;
-                                tri(px0 + wx2, py0 + wy2, px0 - wx2, py0 - wy2, qx, qy,
-                                    rgba(fr, fg2, fb, rayT));
-                            }
-                        }
-                        px0 = qx; py0 = qy;
-                    }
-                }
-            }
+#endif
+    }
+
+#if HAVE_PHOTO && defined(KINGYO_NFIN)
+    // ---- ひれは写真から。切り出した α 付きのひれを、体に合わせた四角形へ貼る。
+    // 手続きで描く板だと、まっすぐな縁とベタの膜になって本物に見えない。
+    // 写真のひれは鰭条も透け方も縁のほつれもそのまま入っている。
+    //
+    // MET = { 長さ/体長, 幅(基底方向)/体長, 付く位置 s }。写真での比率をそのまま使うので、
+    // どこに付くか・どれだけ張り出すかを手で決めなくてよい。
+    // sgn: -1=背側 +1=腹側 / lean: 後ろへの寝かせ具合 / aK: 透け具合
+    // dirx,diry: 根元から先へ向かう画面上の向き(単位ベクトル)。
+    // 胸びれのように「根元を軸に大きく漕ぐ」ひれは、これを回して動かす
+    auto photo_fin_dir = [&](const unsigned char* T, int tw, int th, const float* MET,
+                             double sgn, double dirx, double diry,
+                             double aK, double extra, double ripple) {
+        const int NQ = 8;
+        double s0 = MET[2] - MET[1] * 0.5, s1 = MET[2] + MET[1] * 0.5;
+        double len = MET[0] * f.L * sc0 * extra;
+        double RX[NQ + 1], RY[NQ + 1], TX2[NQ + 1], TY2[NQ + 1];
+        for (int k = 0; k <= NQ; ++k) {
+            double t = (double)k / NQ;
+            double sq = std::max(0.0, std::min(1.0, s0 + (s1 - s0) * t));
+            double fi = sq * NS; int i = clampi((int)fi, 0, NS - 1);
+            double fr2 = fi - i;
+            double rx = SX[i] + (SX[i+1] - SX[i]) * fr2;
+            double ry = SY[i] + (SY[i+1] - SY[i]) * fr2;
+            double hh = HH[i] + (HH[i+1] - HH[i]) * fr2;
+            RX[k] = rx; RY[k] = ry + sgn * hh * 0.88;
+            // ひれは体の波を受けて**基底に沿って波打つ**。先端ほど大きく揺れる
+            double rip = ripple * len * sin(2.0 * M_PI * t * 1.3 - f.phase * 1.0);
+            TX2[k] = RX[k] + dirx * len + uxs * rip;
+            TY2[k] = RY[k] + diry * len + uys * rip;
+        }
+        for (int k = 0; k < NQ; ++k) {
+            double v0 = (double)k / NQ, v1 = (double)(k + 1) / NQ;
+            tex_quad(RX[k], RY[k], TX2[k], TY2[k], TX2[k+1], TY2[k+1], RX[k+1], RY[k+1],
+                     0.0, 1.0, v0, v1, T, tw, th, aK * memF, shade, fog);
+        }
+    };
+    // 背びれ・尻びれ・腹びれ。腹びれは胸びれと同じ位相でゆっくり煽ぐ
+    auto outdir = [&](double sgn, double lean, double& dx2, double& dy2) {
+        dx2 = uxs * lean; dy2 = sgn + uys * lean;
+        double l2 = sqrt(dx2 * dx2 + dy2 * dy2); if (l2 < 1e-6) l2 = 1;
+        dx2 /= l2; dy2 /= l2;
+    };
+    { double dx2, dy2;
+      outdir(-1.0, 0.30, dx2, dy2);
+      photo_fin_dir(KINGYO_DORSAL, KINGYO_DORSAL_W, KINGYO_DORSAL_H, KINGYO_DORSAL_MET,
+                    -1.0, dx2, dy2, 1.00, 1.0, 0.13);
+      outdir(1.0, 0.34, dx2, dy2);
+      photo_fin_dir(KINGYO_ANAL, KINGYO_ANAL_W, KINGYO_ANAL_H, KINGYO_ANAL_MET,
+                    1.0, dx2, dy2, 1.00, 1.0, 0.16);
+      outdir(1.0, 0.30 + 0.10 * sin(f.pecPh * 0.7), dx2, dy2);
+      photo_fin_dir(KINGYO_PELVIC, KINGYO_PELVIC_W, KINGYO_PELVIC_H, KINGYO_PELVIC_MET,
+                    1.0, dx2, dy2, 1.00, 1.0, 0.11);
+    }
+    // 胸びれは前後に漕ぐ。止まっているときほど速い(ホバリング)。左右2枚。
+    // この写真の胸びれは薄くて切り出せなかった(11x32画素)ので、腹びれの写真を使う。
+    // どちらも扇形の対びれなので、形として無理がない
+    {
+        double sw = sin(f.pecPh);
+        const unsigned char* PT = KINGYO_PECTORAL;
+        int ptw = KINGYO_PECTORAL_W, pth = KINGYO_PECTORAL_H;
+        static float pmet[3];
+        pmet[0] = KINGYO_PECTORAL_MET[0]; pmet[1] = KINGYO_PECTORAL_MET[1]; pmet[2] = 0.26f;
+        if (KINGYO_PECTORAL_MET[0] < 0.10f) {          // 切り出せていない
+            PT = KINGYO_PELVIC; ptw = KINGYO_PELVIC_W; pth = KINGYO_PELVIC_H;
+            pmet[0] = KINGYO_PELVIC_MET[0] * 0.85f; pmet[1] = KINGYO_PELVIC_MET[1] * 0.85f;
+        }
+        // 胸びれは根元を軸に大きく漕ぐ。前へ出して水を掻き、後ろへ畳む
+        // **胸びれは根元を軸にぐるっと回す。** 寝かせ具合を変えるだけでは、
+        // 横から見たときにほとんど動いて見えない。前下方〜後下方まで 90度ほど振る
+        for (int sideI = 0; sideI < 2; ++sideI) {
+            double ph2 = f.pecPh + (sideI ? 0.0 : M_PI);       // 左右は逆位相
+            double ang = 1.05 * sin(ph2);                      // [rad] 前後への振り(大きく漕ぐ)
+            // 体の向きを基準に: 下向き(0,1) を、進行方向(-uxs,-uys) 側へ ang だけ回す
+            double dx2 = -uxs * sin(ang) + uys * 0.0;
+            double dy2 = cos(ang);
+            double bx2 = -uys, by2 = uxs;                       // 体の前後方向
+            dx2 = bx2 * (-sin(ang)) * 0.0 + (-uxs) * sin(ang);
+            dy2 = cos(ang);
+            double l2 = sqrt(dx2 * dx2 + dy2 * dy2); if (l2 < 1e-6) l2 = 1;
+            // 漕ぎの往復で見かけの長さも変わる(こちらを向くと短く見える)
+            double fore = 0.60 + 0.40 * fabs(cos(ph2));        // こちらを向くと短く見える
+            photo_fin_dir(PT, ptw, pth, pmet, 1.0, dx2 / l2, dy2 / l2,
+                          sideI ? 1.00 : 0.70, fore, 0.05);
         }
     }
-    // 魚はロール(横回転)しないので、ひれの向きは常に**画面の上下**で決まる。
-    // 進行方向から直交を作ると、左向きと右向きで上下が入れ替わって体に潜り込む
-
-    // 基底の長いひれ(背びれ・尻びれ)。金魚の背びれは扇ではなく背に沿って長く付く。
-    // 1点から広がる扇で描くと、テトラのような小さな三角のひれにしかならない。
-    //   sgn: -1 = 背側 / +1 = 腹側、hMax: 高さ、lean: 後ろへの寝かせ具合
+#else
+    // 写真が無いときは手続きで描く(形は出るが、板に見える)
     auto finstrip = [&](double s0, double s1, double sgn, double hMax, double lean,
                         int memA, int rayA) {
         const int NQ = 6;
@@ -703,11 +1058,9 @@ static void draw_fish(const Fish& f) {
             double ry = SY[i] + (SY[i + 1] - SY[i]) * fr2;
             double hh = HH[i] + (HH[i + 1] - HH[i]) * fr2;
             RX[k] = rx; RY[k] = ry + sgn * hh * 0.94;
-            double h = hMax * sin(M_PI * pow(t, 0.80));      // 前寄りに山、後ろへなだらか
-            // sgn は「画面のどちら側か」。-1=上(背びれ) +1=下(尻びれ・腹びれ)。
-            // 根元も先端も同じ符号で外へ出す(ここを取り違えると、ひれが体に潜り込む)
-            TX[k] = RX[k] + uxs * lean * h;
-            TY[k] = RY[k] + sgn * h + uys * lean * h;
+            double hgt = hMax * sin(M_PI * pow(t, 0.80));
+            TX[k] = RX[k] + uxs * lean * hgt;
+            TY[k] = RY[k] + sgn * hgt + uys * lean * hgt;
         }
         for (int k = 0; k < NQ; ++k) {
             uint32_t c = rgba(fr, fg2, fb, (int)(memA * memF));
@@ -715,7 +1068,7 @@ static void draw_fish(const Fish& f) {
             tri(RX[k], RY[k], TX[k+1], TY[k+1], TX[k], TY[k], c);
         }
         if (rayA * rayF < 3.0) return;
-        for (int k = 0; k <= NQ; ++k) {          // 鰭条(根元から先へ、細く)
+        for (int k = 0; k <= NQ; ++k) {
             double vx2 = TX[k] - RX[k], vy2 = TY[k] - RY[k];
             double vl2 = sqrt(vx2 * vx2 + vy2 * vy2); if (vl2 < 1e-6) continue;
             double wx2 = -vy2 / vl2 * 0.6, wy2 = vx2 / vl2 * 0.6;
@@ -723,32 +1076,29 @@ static void draw_fish(const Fish& f) {
                 RX[k] + vx2 * 0.85, RY[k] + vy2 * 0.85, rgba(fr, fg2, fb, (int)(rayA * rayF)));
         }
     };
-
-    // --- 背びれ。和金は背びれが高く、基底も長い(胴の 3〜6割)
     finstrip(0.30, 0.62, -1.0, 0.175 * f.L * sc0, 0.55, 165, 26);
-    // --- 尻びれ(短い基底)
     finstrip(0.72, 0.86,  1.0, 0.105 * f.L * sc0, 0.60, 155, 24);
-    // --- 腹びれ。胸びれより後ろ、腹の下
     {
         double sw = sin(f.pecPh * 0.7) * 0.10;
         finstrip(0.50, 0.60, 1.0, (0.085 + sw) * f.L * sc0, 0.75, 150, 22);
     }
-    // --- 胸びれ。**金魚はこれで細かく漕いで、その場に留まったり後退したりする。**
-    // 前後に扇ぐので、止まっているときほど忙しなく動く
     {
         int k0 = (int)(0.30 * NS);
         double sw = sin(f.pecPh);
         for (int sgn2 = 0; sgn2 < 2; ++sgn2) {
-            double side2 = sgn2 ? 1.0 : 0.80;               // 奥の1枚は小さく見える
-            double ang = 0.55 + 0.42 * (sgn2 ? sw : -sw);   // 前後に扇ぐ
-            double ox = uxs * ang, oy = 0.55 + uys * ang;      // 下・後ろへ張り出す
+            double side2 = sgn2 ? 1.0 : 0.80;
+            double ang = 0.55 + 0.42 * (sgn2 ? sw : -sw);
+            double ox = uxs * ang, oy = 0.55 + uys * ang;
             double ol = sqrt(ox * ox + oy * oy); if (ol < 1e-6) ol = 1;
             fan(SX[k0], SY[k0] + HH[k0] * 0.34, ox / ol, oy / ol, uxs, uys,
                 0.105 * f.L * sc0 * side2, 0.048 * f.L * sc0 * side2, 0.0, 5,
                 (int)(150 * side2), (int)(24 * side2));
         }
     }
-    // --- 目
+#endif
+
+#if !HAVE_PHOTO
+    // --- 目。**写真を貼っているときは描かない**(写真に目が写っているので二重になる)
     {
         double along = f.L * (0.46 - 0.085 * 0.9);
         double ex, ey, esc;
@@ -767,6 +1117,7 @@ static void draw_fish(const Fish& f) {
             olivec_circle(OC, (int)(ex - er * 0.28), (int)(ey - er * 0.30), std::max(1, (int)(er * 0.3)),
                           rgb(225, 233, 238));
     }
+#endif
 }
 
 // ---------------------------------------------------------------- 近傍探索
@@ -1080,8 +1431,8 @@ KEEP void sim_step(int frames) {
                     double dpit = std::max(-0.6, std::min(0.6, tPit * 0.6 - f.pitch));
                     f.pitch += dpit * 1.5 * dt;
                     f.pitch = std::max(-0.36, std::min(0.36, f.pitch));
-                    double bendT = -rate / maxRate * 0.26 * f.L;
-                    f.bend += (bendT - f.bend) * 4.0 * dt;
+                    double bendT = -rate / maxRate * 0.55 * f.L;   // 金魚は曲がるとき体を大きく弓なりにする
+                    f.bend += (bendT - f.bend) * 5.0 * dt;
                 }
 
                 if (hunger > 0.5 && rnd() < 0.02) f.dartT = 0.35;
